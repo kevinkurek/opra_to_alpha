@@ -1,0 +1,130 @@
+// ...existing code...
+/airflow-docker/logs/*
+/superset/*
+!/superset/docker-compose-non-dev.yml
+!/superset/docker-compose.yml
+/rust-injest/target/*
+// ...existing code...
+
+# pcap files
+*.pcap
+*.zst
+
+# macOS
+.DS_Store
+
+# General
+*.log
+*.tmp
+*.swp
+*.swo
+*.pid
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.so
+*.egg
+*.egg-info/
+.eggs/
+dist/
+build/
+wheels/
+pip-wheel-metadata/
+*.manifest
+*.spec
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+.python-version
+.mypy_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+.cache/
+hypothesis/
+htmlcov/
+.pyre/
+.pytype/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Rust (general; you already ignore rust-injest/target)
+target/
+**/target/
+*.rlib
+Cargo.lock # (Keep if this is a binary or application; remove this line if you want it tracked)
+
+# Node / Frontend (if any)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnp.*
+.pnp.js
+*.tsbuildinfo
+coverage/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.secret
+secrets/
+credentials.json
+
+# Docker
+docker-compose.override.yml
+**/.docker/
+**/docker-data/
+**/tmp/
+
+# Airflow
+airflow.cfg
+unittests.cfg
+airflow.db
+airflow-webserver.pid
+logs/
+*/airflow/logs/
+dags/__pycache__/
+
+# Superset (local state & artifacts)
+superset_home/
+superset.db
+superset.db.*
+superset/.env
+superset/.venv/
+superset/venv/
+superset/instance/
+superset/pythonpath/
+
+# VS Code / IDE
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.iml
+
+# Terraform (if used)
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+
+# Misc tools
+*.coverage
+coverage.xml
+pytestdebug.log
+
+# Temporary
+tmp/
+temp/
+scratch/
+sandbox/

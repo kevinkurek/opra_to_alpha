@@ -1,0 +1,24 @@
+[package]
+name = "opra-pcap-replayer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+tokio = { version = "1.39", features = ["rt-multi-thread", "macros", "fs", "io-util"] }
+bytes = "1"
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+opentelemetry = "0.23"
+opentelemetry-otlp = { version = "0.16", features = ["grpc-tonic"] }
+prometheus = "0.13"
+arrow = "53"
+parquet = "53"
+# For actual PCAP parsing, swap in pcap or custom zero-copy reader when ready:
+pcap-file = "2.0"
+zerocopy = "0.7"
+bytemuck = { version = "1", features = ["derive"] }
+aws-config = "1"
+aws-sdk-s3 = "1"
