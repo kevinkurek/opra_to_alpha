@@ -1,0 +1,35 @@
+# Create conda environment from this file with:
+# conda env create -n opra -f research/environment.yml
+
+name: ds310
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pandas
+  - numpy
+  - scipy
+  - scikit-learn
+  - statsmodels
+  - matplotlib
+  - seaborn
+  - plotly
+  - pyarrow
+  - fastparquet
+  - polars
+  - jupyterlab
+  - ipykernel
+  - notebook
+  - sqlalchemy
+  - requests
+  - beautifulsoup4
+  - lxml
+  - pytest
+  - black
+  - mypy
+  - typer
+  - rich
+  - pip
+  - pip:
+      - duckdb

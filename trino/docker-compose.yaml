@@ -24,6 +24,12 @@ services:
     volumes:
       - ./etc/catalog:/etc/trino/catalog
       - ./etc/config.properties:/etc/trino/config.properties:ro
+      - ./trino/jars/hadoop-aws-3.3.6.jar:/usr/lib/trino/plugin/hive/hadoop-aws-3.3.6.jar:ro
+      - ./trino/jars/aws-java-sdk-bundle-1.12.262.jar:/usr/lib/trino/plugin/hive/aws-java-sdk-bundle-1.12.262.jar:ro
+      # (optional but harmless) also mount to iceberg plugin:
+      - ./trino/jars/hadoop-aws-3.3.6.jar:/usr/lib/trino/plugin/iceberg/hadoop-aws-3.3.6.jar:ro
+      - ./trino/jars/aws-java-sdk-bundle-1.12.262.jar:/usr/lib/trino/plugin/iceberg/aws-java-sdk-bundle-1.12.262.jar:ro
+      - ./trino/hadoop/core-site.xml:/etc/hadoop/conf/core-site.xml:ro
     depends_on:
       - minio
 
@@ -48,6 +54,12 @@ services:
       - ./hive/conf:/opt/hive/conf:ro
       # Mount the PG JDBC driver you downloaded
       - ./hive/lib/postgresql-42.7.3.jar:/opt/hive/lib/postgresql-42.7.3.jar:ro
+      - ./trino/jars/hadoop-aws-3.3.6.jar:/usr/lib/trino/plugin/hive/hadoop-aws-3.3.6.jar:ro
+      - ./trino/jars/aws-java-sdk-bundle-1.12.262.jar:/usr/lib/trino/plugin/hive/aws-java-sdk-bundle-1.12.262.jar:ro
+      # (optional but harmless) also mount to iceberg plugin:
+      - ./trino/jars/hadoop-aws-3.3.6.jar:/usr/lib/trino/plugin/iceberg/hadoop-aws-3.3.6.jar:ro
+      - ./trino/jars/aws-java-sdk-bundle-1.12.262.jar:/usr/lib/trino/plugin/iceberg/aws-java-sdk-bundle-1.12.262.jar:ro
+      - ./trino/hadoop/core-site.xml:/etc/hadoop/conf/core-site.xml:ro
     ports:
       - "9083:9083"
     depends_on:

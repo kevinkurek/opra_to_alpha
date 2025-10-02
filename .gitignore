@@ -128,3 +128,6 @@ tmp/
 temp/
 scratch/
 sandbox/
+
+# jar files
+*.jar
