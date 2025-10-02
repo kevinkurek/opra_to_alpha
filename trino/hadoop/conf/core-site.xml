@@ -1,20 +1,19 @@
-<?xml version="1.0"?>
+<?xml version="1.0" encoding="UTF-8"?>
 <configuration>
-  <!-- Wire up S3A -->
+
+  <!-- Tell Hadoop which implementation handles s3a:// -->
   <property>
     <name>fs.s3a.impl</name>
     <value>org.apache.hadoop.fs.s3a.S3AFileSystem</value>
   </property>
-  <property>
-    <name>fs.AbstractFileSystem.s3a.impl</name>
-    <value>org.apache.hadoop.fs.s3a.S3A</value>
-  </property>
 
-  <!-- MinIO endpoint + creds -->
+  <!-- Point s3a to MinIO (inside docker network) -->
   <property>
     <name>fs.s3a.endpoint</name>
     <value>http://minio:9000</value>
   </property>
+
+  <!-- MinIO needs path-style, and we’re using HTTP -->
   <property>
     <name>fs.s3a.path.style.access</name>
     <value>true</value>
@@ -23,6 +22,8 @@
     <name>fs.s3a.connection.ssl.enabled</name>
     <value>false</value>
   </property>
+
+  <!-- Auth: static keys for MinIO -->
   <property>
     <name>fs.s3a.aws.credentials.provider</name>
     <value>org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider</value>
@@ -34,5 +35,21 @@
   <property>
     <name>fs.s3a.secret.key</name>
     <value>minioadmin</value>
+  </property>
+
+  <!-- (Nice to have) avoid poor DNS caching if MinIO flips -->
+  <property>
+    <name>fs.s3a.dns.socket.factory.class</name>
+    <value>org.apache.hadoop.net.StandardSocketFactory</value>
+  </property>
+
+  <!-- (Optional) a couple of stable defaults -->
+  <property>
+    <name>fs.s3a.fast.upload</name>
+    <value>true</value>
+  </property>
+  <property>
+    <name>fs.s3a.connection.maximum</name>
+    <value>64</value>
   </property>
 </configuration>
