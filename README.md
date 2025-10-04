@@ -3,7 +3,8 @@
 # Trino with Iceberg, Postgres, MinIO, and Airflow
 
 ### Airflow Port 8080
-Quickstart docker compose link: https://airflow.apache.org/docs/apache-airflow/stable/howto/docker-compose/index.html
+Username: airflow
+Password: airflow
 ```bash
 cd airflow-docker
 curl -LfO 'https://airflow.apache.org/docs/apache-airflow/3.1.0/docker-compose.yaml'
@@ -14,7 +15,13 @@ docker ps
 Multiple apache/airflow:3.1.0 containers
 ```
 
-### Trino Port 8081 & MinIO Port 9000
+### Trino 477 Port 8081 & MinIO Port 9000
+Trino
+Username: type any letter and click login.
+
+MinIO
+Username: minioadmin
+Password: minioadmin
 ```bash
 cd trino
 docker compose up -d
@@ -30,9 +37,8 @@ docker ps
 ```
 
 ### Superset Port 8088
-
-* Getting superset to setup locally on docker with trino wasn't simple.
-- Had to use these directions: https://trino.io/episodes/12.html under `Demo: Superset querying Trino to create visualization dashboard` to get the database set up.
+Username: admin
+Password: admin
 
 ```bash
 cd superset
@@ -66,9 +72,8 @@ capinfos ny4-opra-new-a-20230822T143000.pcap
 tshark -r ny4-opra-new-a-20230822T143000.pcap -c 20
 ```
 
-### Unified Docker Compose
+### Global Docker Compose Network
 Either 
-* Make a unified docker compose OR
 * make a shared external network
 ```bash
 docker network create lakehouse
@@ -94,3 +99,14 @@ docker network inspect lakehouse --format '{{json .Containers}}' | jq .
 
 # check which containers running
 docker ps
+
+# check if s3 file system works and and create table
+docker exec -it trino-trino-1 trino --server http://localhost:8081 --execute "CREATE TABLE iceberg.bronze.demo_bronze (symbol VARCHAR, msg_count INTEGER) WITH (format='PARQUET', location='s3://warehouse/bronze/demo_bronze/');"
+```
+
+### Errors, Github tickets, and Debugging
+* UnsupoortedFileSystem s3: 
+  * Similar Github issue: https://github.com/trinodb/trino/discussions/21372
+  * Japanese site: https://blog.bedrock.day/09e466d8ce0ff1fa81ef
+* Superset Database Connection: Had to use these directions: https://trino.io/episodes/12.html under `Demo: Superset querying Trino to create visualization dashboard` to get the database set up.
+* Airflow in Docker: https://airflow.apache.org/docs/apache-airflow/stable/howto/docker-compose/index.html
