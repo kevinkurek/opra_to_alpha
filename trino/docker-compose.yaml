@@ -1,146 +1,87 @@
+# Use an existing Docker network named "lakehouse"
+# This keeps all services on the same user-defined bridge network.
 networks:
   default:
     external: true
     name: lakehouse
 
 services:
+  # ⭐ MinIO object store (S3-compatible). Stores data for Hive/Iceberg/Trino.
   minio:
     image: minio/minio:latest
+    # Start the object store; expose the web console on :9001 inside the container.
     command: server /data --console-address ":9001"
     environment:
+      # Root credentials used by clients (Trino/Hive) to access S3 API.
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
     ports:
+      # Publish S3 API to host port 9000 → clients use http://localhost:9000
       - "9000:9000"   # S3 API
+      # Publish MinIO Console (UI) to host port 9001 → http://localhost:9001
       - "9001:9001"   # Console
     volumes:
+      # Persist MinIO object data on a Docker named volume.
       - minio-data:/data
 
-  # Trino coordinator; catalogs read from ./trino/catalog.
+  # ⭐ Trino query coordinator. Connects to catalogs defined in ./etc/catalog.
+  # Trino lets you query Iceberg/Hive tables stored in MinIO (S3).
   trino:
+    # Pull the latest Trino image.
     image: trinodb/trino:latest
-    environment:
-      AWS_ACCESS_KEY_ID: minioadmin
-      AWS_SECRET_KEY: minioadmin
     ports:
+      # Expose Trino's web UI / coordinator port to the host at 8081.
       - "8081:8081"
     volumes:
+      # Mount your catalog *.properties files (e.g., iceberg.properties, hive.properties).
       - ./etc/catalog:/etc/trino/catalog
+      # Mount Trino's main config (http port, memory, etc.); read-only.
       - ./etc/config.properties:/etc/trino/config.properties:ro
     depends_on:
+      # Ensure MinIO is started before Trino attempts to read/write S3.
       - minio
 
+  # ⭐ Hive Metastore (HMS). Stores table/partition metadata in Postgres (JDO),
+  # and serves it via Thrift on port 9083 for Trino/Spark/Hive clients.
   hive-metastore:
+    # Official Apache Hive 4 image (includes metastore service).
     image: apache/hive:4.0.0
+    # Name the container so it’s easy to exec/logs against.
     container_name: hive-metastore
     environment:
-      AWS_ACCESS_KEY_ID: minioadmin
-      AWS_SECRET_KEY: minioadmin
+      # Ask the image to run the metastore service (vs. CLI or hiveserver2).
       SERVICE_NAME: metastore
+      # Hint that we use Postgres as the JDO backend (driver is provided below via JAR + hive-site.xml).
       DB_DRIVER: postgres
-      SERVICE_OPTS: >-
-        -Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver
-        -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://airflow-docker-postgres-1:5432/hive_metastore
-        -Djavax.jdo.option.ConnectionUserName=hive_meta
-        -Djavax.jdo.option.ConnectionPassword=hivepw
 
-      # <<< KEY: tell Hadoop where core-site.xml lives >>>
+      # Point Hadoop/Hive to where core-site.xml is mounted (S3A/MinIO settings live there).
+      # This tells the HMS how to access S3-compatible storage.
       HADOOP_CONF_DIR: /etc/hadoop/conf
 
-      # <<< KEY: put S3A JARs on both Hadoop and Hive classpaths >>>
+      # Make sure Hadoop sees the S3A libraries (hadoop-aws + aws SDK).
       HADOOP_CLASSPATH: /opt/hadoop/share/hadoop/tools/lib/hadoop-aws-3.3.6.jar:/opt/hadoop/share/hadoop/tools/lib/aws-java-sdk-bundle-1.12.262.jar
+      # Make sure Hive itself also sees those libs and the Postgres JDBC driver.
       HIVE_AUX_JARS_PATH: /opt/hive/lib/postgresql-42.7.3.jar,/opt/hadoop/share/hadoop/tools/lib/hadoop-aws-3.3.6.jar,/opt/hadoop/share/hadoop/tools/lib/aws-java-sdk-bundle-1.12.262.jar
-      
+
     volumes:
+      # Mount hive-site.xml (contains metastore URI and JDO/Postgres connection properties).
+      # The image reads /opt/hive/conf automatically on startup.
       - ./hive/conf:/opt/hive/conf:ro
+      # Mount the Postgres JDBC driver so HMS can connect to the metastore DB.
       - ./hive/lib/postgresql-42.7.3.jar:/opt/hive/lib/postgresql-42.7.3.jar:ro
+      # Mount Hadoop S3A connector JAR (needed if not bundled in the image).
       - ./jars/hadoop-aws-3.3.6.jar:/opt/hadoop/share/hadoop/tools/lib/hadoop-aws-3.3.6.jar:ro
+      # Mount AWS SDK bundle used by S3A connector.
       - ./jars/aws-java-sdk-bundle-1.12.262.jar:/opt/hadoop/share/hadoop/tools/lib/aws-java-sdk-bundle-1.12.262.jar:ro
+      # Mount Hadoop core-site.xml (defines fs.s3a.* endpoint/creds/path-style for MinIO).
       - ./hadoop/conf/core-site.xml:/etc/hadoop/conf/core-site.xml:ro
     ports:
+      # Publish the Hive Metastore Thrift service to host port 9083.
       - "9083:9083"
     depends_on:
+      # HMS needs MinIO reachable if it touches object storage on startup/migrations.
       - minio
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "bash -lc 'exec 3<>/dev/tcp/127.0.0.1/9083 && echo ok || exit 1'"]
-      interval: 5s
-      timeout: 3s
-      retries: 40
-
-# original but s3 file system not supported error
-  # hive-metastore:
-  #   image: apache/hive:4.0.0
-  #   container_name: hive-metastore
-  #   environment:
-  #     SERVICE_NAME: metastore
-  #     DB_DRIVER: postgres
-  #     # Tell Hive where/how to connect to Postgres
-  #     SERVICE_OPTS: >-
-  #       -Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver
-  #       -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://airflow-docker-postgres-1:5432/hive_metastore
-  #       -Djavax.jdo.option.ConnectionUserName=hive_meta
-  #       -Djavax.jdo.option.ConnectionPassword=hivepw
-  #     # Make sure the PG JDBC jar is on the classpath Hive uses
-  #     HIVE_AUX_JARS_PATH: /opt/hive/lib/postgresql-42.7.3.jar
-  #     # Optional: more verbose init logs
-  #     VERBOSE: "true"
-  #   volumes:
-  #     # Your custom hive-site.xml (ok to keep)
-  #     - ./hive/conf:/opt/hive/conf:ro
-  #     # Mount the PG JDBC driver you downloaded
-  #     - ./hive/lib/postgresql-42.7.3.jar:/opt/hive/lib/postgresql-42.7.3.jar:ro
-  #     - ./hadoop/conf/core-site.xml:/etc/hadoop/conf/core-site.xml:ro
-  #   ports:
-  #     - "9083:9083"
-  #   depends_on:
-  #     - minio
 
 volumes:
+  # Named volume to persist MinIO object data across container recreations.
   minio-data:
-  hive-metastore-data:
-
-
-# original 
-# services:
-#   controller:
-#     image: 'trinodb/trino'
-#     hostname: trino
-#     volumes:
-#       - ./etc/catalog:/etc/trino/catalog
-#       # Mount the Trino config so the custom HTTP port (8081) takes effect.
-#       # Without this, the container keeps its default (8080) and host port 8081 maps to a non-listening port.
-#       - ./etc/config.properties:/etc/trino/config.properties:ro
-#     ports:
-#       - '8081:8081'
-#     depends_on:
-#       object-store:
-#         condition: service_healthy
-
-#   object-store:
-#     image: minio/minio
-#     environment:
-#       - MINIO_ROOT_USER=admin
-#       - MINIO_ROOT_PASSWORD=password
-#     ports:
-#       - 9001:9001
-#       - 9000:9000
-#     command: ["server", "/data", "--console-address", ":9001"]
-#     healthcheck:
-#       test: ["CMD-SHELL", "mc alias set minio http://localhost:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD} && mc mb minio/warehouse && mc anonymous set public minio/warehouse"]
-#       interval: 2s
-#       timeout: 2s
-#       retries: 5
-
-
-  # minio:
-  #   image: minio/minio:latest
-  #   command: server /data --console-address ":9001"
-  #   environment:
-  #     MINIO_ROOT_USER: admin
-  #     MINIO_ROOT_PASSWORD: password
-  #   ports:
-  #     - "127.0.0.1:9000:9000"   # S3 API
-  #     - "127.0.0.1:9001:9001"   # Console
-  #   volumes:
-  #   - minio-data:/data
