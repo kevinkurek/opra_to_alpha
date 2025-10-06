@@ -41,6 +41,15 @@ services:
       # Ensure MinIO is started before Trino attempts to read/write S3.
       - minio
 
+  hivemeta-postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: hive
+      POSTGRES_PASSWORD: hive
+      POSTGRES_DB: hive_metastore
+    volumes:
+      - hivemeta-pg-data:/var/lib/postgresql/data
+
   # ⭐ Hive Metastore (HMS). Stores table/partition metadata in Postgres (JDO),
   # and serves it via Thrift on port 9083 for Trino/Spark/Hive clients.
   hive-metastore:
@@ -79,9 +88,11 @@ services:
       # Publish the Hive Metastore Thrift service to host port 9083.
       - "9083:9083"
     depends_on:
+      - hivemeta-postgres
       # HMS needs MinIO reachable if it touches object storage on startup/migrations.
       - minio
 
 volumes:
   # Named volume to persist MinIO object data across container recreations.
   minio-data:
+  hivemeta-pg-data:

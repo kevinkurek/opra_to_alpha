@@ -9,7 +9,7 @@
   <!-- Use Postgres for the metastore DB -->
   <property>
     <name>javax.jdo.option.ConnectionURL</name>
-    <value>jdbc:postgresql://airflow-docker-postgres-1:5432/hive_metastore</value>
+    <value>jdbc:postgresql://trino-hivemeta-postgres-1:5432/hive_metastore</value>
   </property>
   <property>
     <name>javax.jdo.option.ConnectionDriverName</name>
@@ -17,10 +17,10 @@
   </property>
   <property>
     <name>javax.jdo.option.ConnectionUserName</name>
-    <value>hive_meta</value>
+    <value>hive</value>
   </property>
   <property>
     <name>javax.jdo.option.ConnectionPassword</name>
-    <value>hivepw</value>
+    <value>hive</value>
   </property>
 </configuration>
