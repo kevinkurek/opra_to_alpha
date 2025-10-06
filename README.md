@@ -105,8 +105,28 @@ docker exec -it trino-trino-1 trino --server http://localhost:8081 --execute "CR
 ```
 
 ### Errors, Github tickets, and Debugging
-* UnsupoortedFileSystem s3: 
+* Hive: UnsupoortedFileSystem s3: 
   * Similar Github issue: https://github.com/trinodb/trino/discussions/21372 - Kevin added comment there.
   * Japanese site: https://blog.bedrock.day/09e466d8ce0ff1fa81ef
 * Superset Database Connection: Had to use these directions: https://trino.io/episodes/12.html under `Demo: Superset querying Trino to create visualization dashboard` to get the database set up.
 * Airflow in Docker: https://airflow.apache.org/docs/apache-airflow/stable/howto/docker-compose/index.html
+
+* JDBC: Cannot check and eventually update SQL schema
+  * docker exec -it trino-trino-1 trino --server http://localhost:8081 --execute "SHOW SCHEMAS FROM iceberg;"
+Query 20251006_181302_00001_sqjj3 failed: Cannot check and eventually update SQL schema
+  * 'iceberg.jdbc-catalog.initialize-catalog-tables' was not used in Trino 464: https://github.com/trinodb/trino/issues/17744
+  * Solution
+```bash
+docker exec -i trino-iceberg-db-1 psql -U iceberg -d iceberg -c "CREATE TABLE IF NOT EXISTS iceberg_tables (catalog_name VARCHAR(255) NOT NULL, table_namespace VARCHAR(255) NOT NULL, table_name VARCHAR(255) NOT NULL, metadata_location VARCHAR(1000), previous_metadata_location VARCHAR(1000), iceberg_type VARCHAR(5), PRIMARY KEY (catalog_name, table_namespace, table_name));"
+
+docker exec -i trino-iceberg-db-1 psql -U iceberg -d iceberg -c "CREATE TABLE IF NOT EXISTS iceberg_namespace_properties (catalog_name VARCHAR(255) NOT NULL, namespace VARCHAR(255) NOT NULL, property_key VARCHAR(255), property_value VARCHAR(1000), PRIMARY KEY (catalog_name, namespace, property_key));"
+
+docker exec -i trino-iceberg-db-1 psql -U iceberg -d iceberg -c "CREATE TABLE IF NOT EXISTS iceberg_views (catalog_name VARCHAR(255) NOT NULL, table_namespace VARCHAR(255) NOT NULL, table_name VARCHAR(255) NOT NULL, metadata_location VARCHAR(1000), previous_metadata_location VARCHAR(1000), PRIMARY KEY (catalog_name, table_namespace, table_name));"
+
+docker exec -i trino-iceberg-db-1 psql -U iceberg -d iceberg -c "\dt"
+
+docker exec -i trino-trino-1 trino --server http://localhost:8081 --execute "SHOW CATALOGS"
+
+docker exec -i trino-trino-1 trino --server http://localhost:8081 --execute "SHOW SCHEMAS FROM iceberg"
+>> Shows Schemas - information_schema, system, bronze (if created)
+```

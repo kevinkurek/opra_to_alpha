@@ -1,0 +1,12 @@
+This is a placeholder README indicating that the Trino container needs the PostgreSQL JDBC driver.
+
+However, Trino's official image already includes the PostgreSQL JDBC driver for its own PostgreSQL connector.
+The Iceberg JDBC catalog uses the Iceberg library's JDBC client inside the Iceberg connector. For PostgreSQL,
+Trino typically bundles a compatible driver. If you see a startup error like `ClassNotFoundException: org.postgresql.Driver`,
+mount a PostgreSQL JDBC driver JAR into the Trino plugin path, for example:
+
+  - ./jars/postgresql-42.7.3.jar:/usr/lib/trino/plugin/iceberg/postgresql-42.7.3.jar:ro
+
+Or into a general JDBC driver directory loaded by Trino, e.g. /usr/lib/trino/plugin/iceberg/.
+
+This README exists to document the need only if such an error occurs; otherwise no action is required.
