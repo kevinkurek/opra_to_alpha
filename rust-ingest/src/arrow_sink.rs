@@ -6,8 +6,13 @@ use parquet::arrow::ArrowWriter;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tracing::info;
 
 pub fn write_demo_parquet(path: &str) -> Result<PathBuf> {
+
+    // logging
+    info!("writing demo parquet to {:?}", path);
+
     let schema = Arc::new(Schema::new(vec![
         Field::new("symbol", DataType::Utf8, false),
         Field::new("msg_count", DataType::Int64, false),

@@ -58,6 +58,11 @@ cd rust-ingest
 cargo build --release
 cd pcap_sample unzstd ny4-opra-new-a-20230822T143000.pcap
 cd ..
+
+# dry run
+target/release/opra-pcap-replayer --pcap ./pcap_samples/ny4-opra-new-a-20230822T143000.pcap  --bucket s3://market/bronze/opra_pcap/  --minio-endpoint http://127.0.0.1:9000  --access-key minioadmin --secret-key minioadmin  --parallel 4 --row-group-bytes 134217728 --dry-run
+
+# real run
 target/release/opra-pcap-replayer --pcap ./pcap_samples/ny4-opra-new-a-20230822T143000.pcap  --bucket s3://market/bronze/opra_pcap/  --minio-endpoint http://127.0.0.1:9000  --access-key minioadmin --secret-key minioadmin  --parallel 4 --row-group-bytes 134217728
 >>
 2025-10-02T00:28:42.973075Z  INFO opra_pcap_replayer: decoded 0 packets, 0 messages (skeleton)

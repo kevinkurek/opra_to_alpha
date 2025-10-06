@@ -106,9 +106,6 @@ superset/instance/
 superset/pythonpath/
 
 # VS Code / IDE
-.vscode/
-!.vscode/extensions.json
-!.vscode/settings.json
 .idea/
 *.iml
 

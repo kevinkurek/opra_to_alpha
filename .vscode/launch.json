@@ -1,0 +1,38 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug (cargo): opra-pcap-replayer",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${cargo:program}",
+      "cargo": {
+        "args": [
+          "build",
+          "--manifest-path",
+          "${workspaceFolder}/rust-ingest/Cargo.toml",
+          "--bin",
+          "opra-pcap-replayer"
+        ]
+      },
+      "args": [
+        "--pcap", "./pcap_samples/ny4-opra-new-a-20230822T143000.pcap",
+        "--bucket", "s3://market/bronze/opra_pcap/",
+        "--minio-endpoint", "http://127.0.0.1:9000",
+        "--access-key", "minioadmin",
+        "--secret-key", "minioadmin",
+        "--parallel", "4",
+        "--row-group-bytes", "134217728",
+        // "--dry-run" if you want a dry run
+        // For real run, remove --dry-run
+        // target/release/opra-pcap-replayer --pcap ./pcap_samples/ny4-opra-new-a-20230822T143000.pcap  --bucket s3://market/bronze/opra_pcap/  --minio-endpoint http://127.0.0.1:9000  --access-key minioadmin --secret-key minioadmin  --parallel 4 --row-group-bytes 134217728
+      ],
+      "cwd": "${workspaceFolder}/rust-ingest",
+      "env": {
+        "RUST_LOG": "info"
+      },
+      "stopOnEntry": false,
+      "sourceLanguages": ["rust"],
+    }
+  ]
+}

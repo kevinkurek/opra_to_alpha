@@ -35,7 +35,7 @@ struct Args {
     dry_run: bool,
 }
 
-#[tokio::main(flavor="multi_thread")]
+#[tokio::main()]
 async fn main() -> Result<()> {
     telemetry::init()?;
     let args = Args::parse();
@@ -50,7 +50,7 @@ async fn main() -> Result<()> {
     }
 
     // 1) Write demo parquet locally (replace with real batches later)
-    let local_path = "./demo_bronze.parquet";
+    let local_path = "./pcap_samples/demo_bronze.parquet";
     let local_path = arrow_sink::write_demo_parquet(local_path)?;
     info!("wrote {:?}", &local_path);
 
