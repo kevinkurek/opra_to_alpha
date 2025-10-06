@@ -66,7 +66,7 @@ services:
     volumes:
       # Mount hive-site.xml (contains metastore URI and JDO/Postgres connection properties).
       # The image reads /opt/hive/conf automatically on startup.
-      - ./hive/conf:/opt/hive/conf:ro
+      - ./hive/conf:/opt/hive/conf:ro # ro: read-only
       # Mount the Postgres JDBC driver so HMS can connect to the metastore DB.
       - ./hive/lib/postgresql-42.7.3.jar:/opt/hive/lib/postgresql-42.7.3.jar:ro
       # Mount Hadoop S3A connector JAR (needed if not bundled in the image).

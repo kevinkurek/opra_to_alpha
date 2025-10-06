@@ -106,7 +106,7 @@ docker exec -it trino-trino-1 trino --server http://localhost:8081 --execute "CR
 
 ### Errors, Github tickets, and Debugging
 * UnsupoortedFileSystem s3: 
-  * Similar Github issue: https://github.com/trinodb/trino/discussions/21372
+  * Similar Github issue: https://github.com/trinodb/trino/discussions/21372 - Kevin added comment there.
   * Japanese site: https://blog.bedrock.day/09e466d8ce0ff1fa81ef
 * Superset Database Connection: Had to use these directions: https://trino.io/episodes/12.html under `Demo: Superset querying Trino to create visualization dashboard` to get the database set up.
 * Airflow in Docker: https://airflow.apache.org/docs/apache-airflow/stable/howto/docker-compose/index.html
