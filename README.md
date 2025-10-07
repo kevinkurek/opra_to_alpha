@@ -1,44 +1,129 @@
+# 🧊 Trino + Iceberg + Postgres + MinIO + Airflow + Superset
+
+A full local **lakehouse stack** for data ingestion, query federation, and orchestration—integrating Trino, Apache Iceberg, MinIO (S3-compatible object store), Postgres (metadata + Airflow DB), and Apache Airflow.  
+Rust-based OPRA PCAP ingestion is also included for feed replay into MinIO.
+
 ![](datalake.jpg)
 
-# Trino with Iceberg, Postgres, MinIO, and Airflow
+---
 
-### Airflow Port 8080
-Username: airflow
-Password: airflow
+## Rough tree structure (with depth excluded for clarity)
+```bash
+tree -L 4 -I 'node_modules|__pycache__|logs|plugins|superset|debug|release' -P '*.yaml|*.properties|*.yml|*.rs|*.xml|*.pcap'
+>>
+├── airflow-docker
+│   ├── config
+│   ├── dags
+│   └── docker-compose.yaml
+├── superset
+│   └── docker-compose-non-dev.yaml
+├── research
+│   └── environment.yml
+├── rust-ingest
+│   ├── pcap_samples
+│   │   └── ny4-opra-new-a-20230822T143000.pcap
+│   ├── src
+│   │   ├── arrow_sink.rs
+│   │   ├── main.rs
+│   │   ├── opra_decoder.rs
+│   │   └── telemetry.rs
+│   └── target
+└── trino
+    ├── docker-compose.yaml # sets up trino, minio, hive-metastore, hive-postgres db
+    ├── etc
+    │   ├── catalog
+    │   │   ├── hive.properties
+    │   │   └── iceberg.properties
+    │   └── config.properties
+    ├── hadoop
+    │   └── conf
+    │       └── core-site.xml
+    ├── hive
+    │   ├── conf
+    │   │   └── hive-site.xml
+    │   └── lib
+    └── jars
+```
+
+---
+
+## 🧠 Wireshark / tshark Utilities
+
+```bash
+brew install wireshark   # provides tshark & capinfos
+cd rust-ingest/pcap_samples
+tshark -r ny4-opra-new-a-20230822T143000.pcap -c 5
+>>
+    1   0.000000 162.69.45.40 → 224.0.204.40 UDP 154 45040 → 45040 Len=108
+    2   0.000003 162.69.45.37 → 224.0.204.37 UDP 96 45037 → 45037 Len=50
+    3   0.000004 162.69.45.38 → 224.0.204.38 UDP 212 45038 → 45038 Len=166
+    4   0.000008 162.69.45.38 → 224.0.204.38 UDP 96 45038 → 45038 Len=50
+    5   0.000009 162.69.45.37 → 224.0.204.37 UDP 154 45037 → 45037 Len=108
+```
+
+| **Column** | **Example** | **Description** |
+|-------------|--------------|-----------------|
+| **No.** | `1` | Sequential frame number in the capture file. |
+| **Time** | `0.000000` | Seconds since start of capture — useful for latency analysis. |
+| **Source** | `162.69.45.40` | Source IP address (unicast sender of the OPRA feed). |
+| **→** | `→` | Direction of the packet flow. |
+| **Destination** | `224.0.204.40` | Multicast group address — identifies the OPRA channel. |
+| **Protocol** | `UDP` | Transport protocol (OPRA uses UDP multicast). |
+| **Length** | `154` | Total frame size (bytes on wire, including headers). |
+| **Info** | `45040 → 45040 Len=108` | UDP layer summary: source port, destination port, and payload size. |
+
+---
+
+---
+
+## 🪶 Apache Airflow
+**Port:** `8080`  
+**Username:** `airflow`  
+**Password:** `airflow`
+
 ```bash
 cd airflow-docker
 curl -LfO 'https://airflow.apache.org/docs/apache-airflow/3.1.0/docker-compose.yaml'
 docker compose up airflow-init -d
 docker compose up -d
-docker ps
->>
-Multiple apache/airflow:3.1.0 containers
+docker ps  # Should show multiple apache/airflow:3.1.0 containers
 ```
 
-### Trino 477 Port 8081 & MinIO Port 9000
-Trino
-Username: type any letter and click login.
+---
 
-MinIO
+## ☁️ MinIO (S3-Compatible Storage)
+**Port:** `9000` (API), `9001` (Console)  
+**Credentials:**  
+```
 Username: minioadmin
 Password: minioadmin
+```
+
 ```bash
 cd trino
 docker compose up -d
 docker ps
+```
 
-# connection strings that works in Superset when iceberg.jdbc-catalog.catalog-schema=iceberg is commented out?
-# trino://trino@host.docker.internal:8081
-# trino://trino@trino-trino-1:8081/iceberg
-# trino://trino@trino-trino-1:8081/jdbc
+---
 
-# outline
+## ⚙️ Trino 477
+**Port:** `8081`  
+**Login:** Any username; no password required for default setup.
+
+**Example Superset Connection Strings**
+```bash
+trino://trino@trino-trino-1:8081/iceberg
+# Format:
 # trino://{username}:{password}@{hostname}:{port}/{catalog}
 ```
 
-### Superset Port 8088
-Username: admin
-Password: admin
+---
+
+## 📊 Apache Superset
+**Port:** `8088`  
+**Username:** `admin`  
+**Password:** `admin`
 
 ```bash
 cd superset
@@ -46,72 +131,84 @@ git clone https://github.com/apache/superset.git
 echo "sqlalchemy-trino" >> ./docker/requirements-local.txt
 docker compose -f docker-compose-non-dev.yml up -d
 ```
-Inside of Trino
-Click the +Database button.
-Set Name to “Trino” and URI to `trino://trino@host.docker.internal:8081` and click Add.
-- make sure you select in advanced the non-checked boxes of CREATE TABLE AS, CREATE VIEW AS, ALLOW DDL and DML
 
+**Add Trino Connection:**
+1. In Superset, click **+ Database**.  
+2. Set **Name:** `Trino`  
+3. Set **URI:** `trino://trino@trino:8081/iceberg`
+4. In **Advanced**, ensure the following boxes are unchecked:
+   - `CREATE TABLE AS`
+   - `CREATE VIEW AS`
+   - `ALLOW DDL`
+   - `ALLOW DML`
 
-### Rust Ingest Run
+---
+
+## 🦀 Rust Ingest (OPRA PCAP → Parquet → MinIO)
+
 ```bash
 cd rust-ingest
 cargo build --release
-cd pcap_sample unzstd ny4-opra-new-a-20230822T143000.pcap
+cd pcap_samples
+unzstd ny4-opra-new-a-20230822T143000.pcap
 cd ..
 
-# dry run
-target/release/opra-pcap-replayer --pcap ./pcap_samples/ny4-opra-new-a-20230822T143000.pcap  --bucket s3://market/bronze/opra_pcap/  --minio-endpoint http://127.0.0.1:9000  --access-key minioadmin --secret-key minioadmin  --parallel 4 --row-group-bytes 134217728 --dry-run
+# Dry Run
+target/release/opra-pcap-replayer   --pcap ./pcap_samples/ny4-opra-new-a-20230822T143000.pcap   --bucket s3://market/bronze/opra_pcap/   --minio-endpoint http://127.0.0.1:9000   --access-key minioadmin   --secret-key minioadmin   --parallel 4   --row-group-bytes 134217728   --dry-run
 
-# real run
-target/release/opra-pcap-replayer --pcap ./pcap_samples/ny4-opra-new-a-20230822T143000.pcap  --bucket s3://market/bronze/opra_pcap/  --minio-endpoint http://127.0.0.1:9000  --access-key minioadmin --secret-key minioadmin  --parallel 4 --row-group-bytes 134217728
->>
-2025-10-02T00:28:42.973075Z  INFO opra_pcap_replayer: decoded 0 packets, 0 messages (skeleton)
-2025-10-02T00:28:42.979472Z  INFO opra_pcap_replayer: wrote "./demo_bronze.parquet"
-2025-10-02T00:28:43.179312Z  INFO opra_pcap_replayer: uploaded to s3://market/bronze/opra_pcap/demo_bronze.parquet
+# Real Run
+target/release/opra-pcap-replayer   --pcap ./pcap_samples/ny4-opra-new-a-20230822T143000.pcap   --bucket s3://market/bronze/opra_pcap/   --minio-endpoint http://127.0.0.1:9000   --access-key minioadmin   --secret-key minioadmin   --parallel 4   --row-group-bytes 134217728
 ```
 
-### Wireshark
-```bash
-brew install wireshark   # gives tshark & capinfos
-capinfos ny4-opra-new-a-20230822T143000.pcap
-tshark -r ny4-opra-new-a-20230822T143000.pcap -c 20
+Expected output:
+```
+INFO opra_pcap_replayer: decoded 0 packets, 0 messages (skeleton)
+INFO opra_pcap_replayer: wrote "./demo_bronze.parquet"
+INFO opra_pcap_replayer: uploaded to s3://market/bronze/opra_pcap/demo_bronze.parquet
 ```
 
-### Global Docker Compose Network
-Either 
-* make a shared external network
+---
+
+## 🐳 Global Docker Network
+Make all services share one network:
 ```bash
 docker network create lakehouse
 
-# add inside each docker-compose.yaml
+# Add to each docker-compose.yaml:
 networks:
   default:
     external: true
     name: lakehouse
 ```
 
+---
 
-docker exec -it airflow-docker-postgres-1 psql -U airflow -d airflow -c "CREATE DATABASE iceberg;"
-docker exec -it airflow-docker-postgres-1 psql -U airflow -d airflow -c "CREATE USER etl WITH PASSWORD 'demopass';"
-docker exec -it airflow-docker-postgres-1 psql -U airflow -d airflow -c "GRANT ALL PRIVILEGES ON DATABASE iceberg TO etl;"
+## 🔧 Debugging & Maintenance
 
-
-### Useful docker commands while debugging
 ```bash
-
-# check which containers are on network
+# View containers attached to network
 docker network inspect lakehouse --format '{{json .Containers}}' | jq .
 
-# check which containers running
+# List active containers
 docker ps
 
-# check if s3 file system works and and create table
-docker exec -it trino-trino-1 trino --server http://localhost:8081 --execute "CREATE TABLE iceberg.bronze.demo_bronze (symbol VARCHAR, msg_count INTEGER) WITH (format='PARQUET', location='s3://warehouse/bronze/demo_bronze/');"
+# Test Trino Schemas present
+docker exec -it trino-trino-1 trino   --server http://localhost:8081   --execute "SHOW SCHEMAS FROM iceberg;"
+
+# Test Trino table creation
+docker exec -it trino-trino-1 trino   --server http://localhost:8081   --execute "CREATE TABLE iceberg.bronze.demo_bronze (
+      symbol VARCHAR,
+      msg_count INTEGER
+    )
+    WITH (format='PARQUET', location='s3://warehouse/bronze/demo_bronze/');"
 ```
 
-### Errors, Github tickets, and Debugging
-* UnsupoortedFileSystem s3: 
-  * Similar Github issue: https://github.com/trinodb/trino/discussions/21372 - Kevin added comment there.
-  * Japanese site: https://blog.bedrock.day/09e466d8ce0ff1fa81ef
-* Superset Database Connection: Had to use these directions: https://trino.io/episodes/12.html under `Demo: Superset querying Trino to create visualization dashboard` to get the database set up.
-* Airflow in Docker: https://airflow.apache.org/docs/apache-airflow/stable/howto/docker-compose/index.html
+---
+
+## 🚨 Common Errors & References
+
+| **Issue** | **Description / Fix** |
+|------------|-----------------------|
+| `UnsupportedFileSystem s3:` | Related GitHub: [Trino discussion #21372](https://github.com/trinodb/trino/discussions/21372) — Kevin added comment there. Japanese blog: [Bedrock](https://blog.bedrock.day/09e466d8ce0ff1fa81ef) |
+| **Superset DB Connection Failure** | Follow [Trino.io Episode #12](https://trino.io/episodes/12.html) under *Demo: Superset querying Trino*. |
+| **Airflow in Docker** | Reference official [Airflow Compose guide](https://airflow.apache.org/docs/apache-airflow/stable/howto/docker-compose/index.html). |
