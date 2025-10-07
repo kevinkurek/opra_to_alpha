@@ -1,0 +1,116 @@
+[
+  {
+    "_index": "packets-2023-08-22",
+    "_type": "doc",
+    "_score": null,
+    "_source": {
+      "layers": {
+        "frame": {
+          "frame.encap_type": "1",
+          "frame.time": "Aug 22, 2023 07:30:00.000008000 PDT",
+          "frame.time_utc": "Aug 22, 2023 14:30:00.000008000 UTC",
+          "frame.time_epoch": "1692714600.000008000",
+          "frame.offset_shift": "0.000000000",
+          "frame.time_delta": "0.000000000",
+          "frame.time_delta_displayed": "0.000000000",
+          "frame.time_relative": "0.000000000",
+          "frame.number": "1",
+          "frame.len": "154",
+          "frame.cap_len": "154",
+          "frame.marked": "0",
+          "frame.ignored": "0",
+          "frame.protocols": "eth:ethertype:vlan:ethertype:ip:udp:data"
+        },
+        "eth": {
+          "eth.dst": "01:00:5e:00:cc:28",
+          "eth.dst_tree": {
+            "eth.dst_resolved": "IPv4mcast_cc:28",
+            "eth.dst.oui": "65630",
+            "eth.dst.oui_resolved": "ICANN, IANA Department",
+            "eth.dst.lg": "0",
+            "eth.dst.ig": "1",
+            "eth.addr": "01:00:5e:00:cc:28",
+            "eth.addr_resolved": "IPv4mcast_cc:28",
+            "eth.addr.oui": "65630",
+            "eth.addr.oui_resolved": "ICANN, IANA Department",
+            "eth.lg": "0",
+            "eth.ig": "1"
+          },
+          "eth.src": "d4:af:f7:cb:20:d5",
+          "eth.src_tree": {
+            "eth.src_resolved": "AristaNetwor_cb:20:d5",
+            "eth.src.oui": "13938679",
+            "eth.src.oui_resolved": "Arista Networks",
+            "eth.src.lg": "0",
+            "eth.src.ig": "0",
+            "eth.addr": "d4:af:f7:cb:20:d5",
+            "eth.addr_resolved": "AristaNetwor_cb:20:d5",
+            "eth.addr.oui": "13938679",
+            "eth.addr.oui_resolved": "Arista Networks",
+            "eth.lg": "0",
+            "eth.ig": "0"
+          },
+          "eth.type": "0x8100",
+          "eth.stream": "0"
+        },
+        "vlan": {
+          "vlan.priority": "0",
+          "vlan.dei": "0",
+          "vlan.id": "141",
+          "vlan.etype": "0x0800"
+        },
+        "ip": {
+          "ip.version": "4",
+          "ip.hdr_len": "20",
+          "ip.dsfield": "0x00",
+          "ip.dsfield_tree": {
+            "ip.dsfield.dscp": "0",
+            "ip.dsfield.ecn": "0"
+          },
+          "ip.len": "136",
+          "ip.id": "0x0000",
+          "ip.flags": "0x00",
+          "ip.flags_tree": {
+            "ip.flags.rb": "0",
+            "ip.flags.df": "0",
+            "ip.flags.mf": "0"
+          },
+          "ip.frag_offset": "0",
+          "ip.ttl": "119",
+          "ip.proto": "17",
+          "ip.checksum": "0xc7ce",
+          "ip.checksum.status": "2",
+          "ip.src": "162.69.45.40",
+          "ip.addr": "162.69.45.40",
+          "ip.src_host": "162.69.45.40",
+          "ip.host": "162.69.45.40",
+          "ip.dst": "224.0.204.40",
+          "ip.addr": "224.0.204.40",
+          "ip.dst_host": "224.0.204.40",
+          "ip.host": "224.0.204.40",
+          "ip.stream": "0"
+        },
+        "udp": {
+          "udp.srcport": "45040",
+          "udp.dstport": "45040",
+          "udp.port": "45040",
+          "udp.port": "45040",
+          "udp.length": "116",
+          "udp.checksum": "0xc4cf",
+          "udp.checksum.status": "2",
+          "udp.stream": "0",
+          "udp.stream.pnum": "1",
+          "Timestamps": {
+            "udp.time_relative": "0.000000000",
+            "udp.time_delta": "0.000000000"
+          },
+          "udp.payload": "06:00:6c:4f:20:00:15:30:b0:03:03:64:e4:c6:67:3b:97:bf:00:1e:70:43:71:41:41:41:0b:cc:43:3b:93:2c:c8:53:50:59:20:54:1e:17:10:86:00:30:01:36:00:32:01:a2:43:71:41:41:41:0b:cc:43:3b:93:2c:c8:53:50:59:20:54:16:17:11:26:00:4e:00:2d:00:50:01:b2:43:71:41:41:41:0b:cc:43:3b:93:2c:c8:53:50:59:20:54:19:17:11:1c:00:e1:00:79:00:e4:00:c1"
+        },
+        "data": {
+          "data.data": "06:00:6c:4f:20:00:15:30:b0:03:03:64:e4:c6:67:3b:97:bf:00:1e:70:43:71:41:41:41:0b:cc:43:3b:93:2c:c8:53:50:59:20:54:1e:17:10:86:00:30:01:36:00:32:01:a2:43:71:41:41:41:0b:cc:43:3b:93:2c:c8:53:50:59:20:54:16:17:11:26:00:4e:00:2d:00:50:01:b2:43:71:41:41:41:0b:cc:43:3b:93:2c:c8:53:50:59:20:54:19:17:11:1c:00:e1:00:79:00:e4:00:c1",
+          "data.len": "108"
+        }
+      }
+    }
+  }
+]

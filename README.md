@@ -14,9 +14,9 @@ tree -L 4 -I 'node_modules|__pycache__|logs|plugins|superset|debug|release' -P '
 ├── airflow-docker
 │   ├── config
 │   ├── dags
-│   └── docker-compose.yaml
+│   └── docker-compose.yaml # sets up airflow
 ├── superset
-│   └── docker-compose-non-dev.yaml
+│   └── docker-compose-non-dev.yaml # sets up superset
 ├── research
 │   └── environment.yml
 ├── rust-ingest
@@ -59,6 +59,9 @@ tshark -r ny4-opra-new-a-20230822T143000.pcap -c 5
     3   0.000004 162.69.45.38 → 224.0.204.38 UDP 212 45038 → 45038 Len=166
     4   0.000008 162.69.45.38 → 224.0.204.38 UDP 96 45038 → 45038 Len=50
     5   0.000009 162.69.45.37 → 224.0.204.37 UDP 154 45037 → 45037 Len=108
+
+# export 1 packet to a json for easier inspection
+tshark -r ny4-opra-new-a-20230822T143000.pcap -c 1 -T json > example_packets.json
 ```
 
 | **Column** | **Example** | **Description** |
