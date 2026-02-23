@@ -77,6 +77,100 @@ tshark -r ny4-opra-new-a-20230822T143000.pcap -c 1 -T json > example_packets.jso
 
 ---
 
+## PCAP Structure Overview
+```bash
+# High level structure
+PCAP Packet Record
+└── Ethernet Frame
+      ├── Ethernet Header (eth.*)
+      ├── VLAN Header (vlan.*)
+      └── IPv4 Packet (ip.*)
+            ├── IPv4 Header
+            └── UDP Datagram (udp.*)
+                  ├── UDP Header
+                  └── UDP Payload (udp.payload / data.data)
+                        └── OPRA Transmission Block
+                              └── OPRA Messages
+
+# With Depth
+PCAP FILE
+├── Global Header
+└── PCAP Packet Record(s)
+      ├── Timestamp
+      ├── Captured Length
+      ├── Original Length
+      └── Raw Ethernet Frame  <── actual network data starts here
+            ├── Ethernet Header (L2, 14 bytes)
+            │     ├── Destination MAC
+            │     ├── Source MAC
+            │     └── EtherType
+            │           ├── 0x0800 → IPv4 directly
+            │           └── 0x8100 / 0x88a8 → VLAN tag present
+            │
+            ├── [Optional] VLAN Header (4 bytes, if EtherType = 0x8100 / 0x88a8)
+            │     ├── Priority / DEI
+            │     ├── VLAN ID
+            │     └── Inner EtherType = 0x0800 (IPv4)
+            │
+            └── Ethernet Payload (after optional VLAN)
+                  ├── IPv4 Header (L3, 20–60 bytes)
+                  │     ├── Version + Header Length
+                  │     ├── Total Packet Length
+                  │     ├── Protocol = 17 (UDP)
+                  │     ├── Source IP
+                  │     └── Destination IP (OPRA multicast group)
+                  │
+                  └── IPv4 Payload
+                        ├── UDP Header (L4, 8 bytes)
+                        │     ├── Source Port
+                        │     ├── Destination Port
+                        │     ├── UDP Length
+                        │     └── Checksum
+                        │
+                        └── UDP Payload
+                              ├── OPRA Transmission Block
+                              │     ├── Block Header (21 bytes)
+                              │     │     ├── Block Size
+                              │     │     ├── Data Feed Indicator ('O')
+                              │     │     ├── Retransmission Indicator
+                              │     │     ├── Session Indicator
+                              │     │     ├── Block Sequence Number
+                              │     │     ├── Messages In Block
+                              │     │     ├── Timestamp (sec + ns)
+                              │     │     └── Checksum
+                              │     │
+                              │     └── Block Data
+                              │           ├── Message #1
+                              │           │     ├── 12-byte Message Header
+                              │           │     └── Message Body
+                              │           ├── Message #2
+                              │           │     ├── Header
+                              │           │     └── Body
+                              │           └── ...
+                              │
+                              └── (Optional pad byte if block length is odd)
+```
+
+---
+
+## 🐳 Global Docker Network
+Make all services share one network:
+```bash
+
+# This is already set inside of airflow-docker/docker-compose.yaml which will
+# create the network automatically if it doesn't exist
+networks:
+  default:
+    # external: true # Uncomment if you already created this network with docker network create lakehouse, if not, it will be created automatically when you run docker-compose up
+    name: lakehouse
+
+# Already inside of trino/docker-compose.yaml, superset/docker-compose-non-dev.yaml
+networks:
+  default:
+    external: true # will connect to lakehouse network assuming you already stood up airflow-docker which creates it
+    name: lakehouse
+```
+
 ---
 
 ## 🪶 Apache Airflow
@@ -131,12 +225,17 @@ trino://trino@trino-trino-1:8081/iceberg
 ```bash
 cd superset
 git clone https://github.com/apache/superset.git
-echo "sqlalchemy-trino" >> ./docker/requirements-local.txt
+# check if you already have sqlalchemy-trino in your local requirements
+grep -n "sqlalchemy-trino" ./docker/requirements-local.txt
+
+# if not then run this command to add it
+# echo "sqlalchemy-trino" >> ./docker/requirements-local.txt
+
 docker compose -f docker-compose-non-dev.yml up -d
 ```
 
 **Add Trino Connection:**
-1. In Superset, click **+ Database**.  
+1. In Superset, Settings -> Database Connections -> click **+ Database**.  
 2. Set **Name:** `Trino`  
 3. Set **URI:** `trino://trino@trino:8081/iceberg`
 4. In **Advanced**, ensure the following boxes are unchecked:
@@ -151,19 +250,25 @@ docker compose -f docker-compose-non-dev.yml up -d
 
 ```bash
 cd rust-ingest
-cargo build --release
+cargo build --release # release build for better performance
 cd pcap_samples
 unzstd ny4-opra-new-a-20230822T143000.pcap
 cd ..
 
-# Dry Run
+# Dry-run with cargo
+cargo run --release -- --pcap ./pcap_samples/ny4-opra-new-a-20230822T143000.pcap   --bucket s3://market/bronze/opra_pcap/   --minio-endpoint http://127.0.0.1:9000   --access-key minioadmin   --secret-key minioadmin   --parallel 4   --row-group-bytes 134217728  --dry-run
+
+# Real run with cargo
+cargo run --release -- --pcap ./pcap_samples/ny4-opra-new-a-20230822T143000.pcap   --bucket s3://market/bronze/opra_pcap/   --minio-endpoint http://127.0.0.1:9000   --access-key minioadmin   --secret-key minioadmin   --parallel 4   --row-group-bytes 134217728
+
+# Run dry-run directly with the compiled binary (after cargo build --release)
 target/release/opra-pcap-replayer   --pcap ./pcap_samples/ny4-opra-new-a-20230822T143000.pcap   --bucket s3://market/bronze/opra_pcap/   --minio-endpoint http://127.0.0.1:9000   --access-key minioadmin   --secret-key minioadmin   --parallel 4   --row-group-bytes 134217728   --dry-run
 
-# Real Run
+# Run real directly with the compiled binary (after cargo build --release)
 target/release/opra-pcap-replayer   --pcap ./pcap_samples/ny4-opra-new-a-20230822T143000.pcap   --bucket s3://market/bronze/opra_pcap/   --minio-endpoint http://127.0.0.1:9000   --access-key minioadmin   --secret-key minioadmin   --parallel 4   --row-group-bytes 134217728
 ```
 
-Expected output:
+Real Run Expected output:
 ```
 INFO opra_pcap_replayer: decoded 0 packets, 0 messages (skeleton)
 INFO opra_pcap_replayer: wrote "./demo_bronze.parquet"
@@ -172,17 +277,26 @@ INFO opra_pcap_replayer: uploaded to s3://market/bronze/opra_pcap/demo_bronze.pa
 
 ---
 
-## 🐳 Global Docker Network
-Make all services share one network:
-```bash
-docker network create lakehouse
+## 🧑‍🔬 Creating Iceberg Schemas & Tables inside Superset
+### Note: Trino can also be used directly for this, but doing it through Superset allows you to verify the connection and permissions from the UI. It also assumes you've already ingested data into MinIO using the Rust OPRA PCAP replayer section above and that you've connected Superset to Trino as described in the Superset section.
 
-# Add to each docker-compose.yaml:
-networks:
-  default:
-    external: true
-    name: lakehouse
+```sql
+-- Create bronze schema if it doesn't exist
+CREATE SCHEMA IF NOT EXISTS iceberg.bronze;
+
+-- Drop old table if you want a clean rebuild
+DROP TABLE IF EXISTS iceberg.bronze.demo_bronze;
+
+-- Create bronze table from the external hive staging table
+CREATE TABLE iceberg.bronze.demo_bronze
+WITH (
+  format = 'PARQUET',
+  location = 's3://warehouse/bronze/demo_bronze/'
+) AS
+SELECT *
+FROM hive.stage.demo_bronze_ext;
 ```
+
 
 ---
 

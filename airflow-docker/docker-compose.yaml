@@ -47,7 +47,7 @@
 
 networks:
   default:
-    external: true
+    # external: true # Uncomment if you already created this network with docker network create lakehouse, if not, it will be created automatically when you run docker-compose up
     name: lakehouse
 
 x-airflow-common:
