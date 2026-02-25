@@ -1,7 +1,25 @@
 use anyhow::{anyhow, Result};
-use pcap_parser::{Capture, PcapBlock, PcapCapture};
+use pcap_parser::{PcapBlock, PcapCapture, Capture};
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
+
+const ETHERNET_HEADER_LEN: usize = 14;
+const VLAN_HEADER_LEN: usize = 4;
+const IPV4_MIN_HEADER_LEN: usize = 20;
+const UDP_HEADER_LEN: usize = 8;
+
+const ETHERTYPE_OFFSET: usize = 12;
+const VLAN_INNER_ETHERTYPE_OFFSET: usize = 16;
+const IPV4_PROTOCOL_FIELD_OFFSET: usize = 9;
+const UDP_LENGTH_FIELD_OFFSET: usize = 4;
+
+const ETHERTYPE_IPV4: u16 = 0x0800;
+const ETHERTYPE_VLAN_8021Q: u16 = 0x8100;
+const ETHERTYPE_VLAN_8021AD: u16 = 0x88a8;
+const IP_PROTOCOL_UDP: u8 = 17;
+
+const OPRA_BLOCK_HEADER_LEN: usize = 21;
+const OPRA_MESSAGES_IN_BLOCK_OFFSET: usize = 9;
 
 #[derive(Debug, Default)]
 pub struct DecodeStats {
@@ -11,29 +29,24 @@ pub struct DecodeStats {
 
 /// Skeleton decoder: replace with real OPRA Pillar parsing.
 pub async fn decode_pcap(path: &str, _parallel: usize) -> Result<DecodeStats> {
-    // Read file into memory
-    let mut f = File::open(path).await?;
-    let mut buf = Vec::new();
-    f.read_to_end(&mut buf).await?;
+    let mut file = File::open(path).await?;
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer).await?;
 
-    // Parse legacy PCAP in-memory
-    let capture = PcapCapture::from_file(&buf)
-        .map_err(|e| anyhow!("failed to parse pcap: {e:?}"))?;
+    let capture = PcapCapture::from_file(&buffer)
+        .map_err(|error| anyhow!("failed to parse pcap: {error}"))?;
 
     let mut stats = DecodeStats::default();
 
     for block in capture.iter() {
         if let PcapBlock::Legacy(legacy) = block {
-            stats.packets += 1;
+            stats.packets = stats.packets.saturating_add(1);
 
-            // legacy.data is the captured L2 frame:
-            // Ethernet [+ optional VLAN] + IPv4 + UDP + payload
             if let Some(udp_payload) = extract_udp_payload(legacy.data) {
-                if let Some(msgs) = count_opra_messages(udp_payload) {
-                    stats.messages += msgs as u64;
+                if let Some(message_count) = count_opra_messages(udp_payload) {
+                    stats.messages = stats.messages.saturating_add(u64::from(message_count));
                 }
 
-                // TODO: call a real OPRA parser here
                 // parse_opra_block(udp_payload, &mut stats)
             }
         }
@@ -42,113 +55,95 @@ pub async fn decode_pcap(path: &str, _parallel: usize) -> Result<DecodeStats> {
     Ok(stats)
 }
 
-/// Extract the UDP payload (OPRA block) from a raw Ethernet frame.
-///
-/// Handles:
-/// - Plain Ethernet + IPv4 + UDP
-/// - Ethernet + 802.1Q/802.1ad VLAN + IPv4 + UDP
+#[must_use]
 fn extract_udp_payload(frame: &[u8]) -> Option<&[u8]> {
-    // Need at least Ethernet (14) + IPv4 min (20) + UDP (8).
-    if frame.len() < 14 + 20 + 8 {
+    let min_frame_len = ETHERNET_HEADER_LEN
+        .checked_add(IPV4_MIN_HEADER_LEN)?
+        .checked_add(UDP_HEADER_LEN)?;
+    if frame.len() < min_frame_len {
         return None;
     }
 
-    // EtherType at bytes 12-13
-    let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
-
-    // Determine where the IPv4 header actually starts.
-    // - 0x0800: plain IPv4 immediately after Ethernet (offset 14)
-    // - 0x8100 / 0x88a8: VLAN tag present, inner EtherType at bytes 16-17
+    let ethertype = read_be_u16_at(frame, ETHERTYPE_OFFSET)?;
     let ip_start = match ethertype {
-        0x0800 => {
-            // Ethernet type = IPv4, no VLAN
-            14
-        }
-        0x8100 | 0x88a8 => {
-            // 802.1Q / 802.1ad VLAN tag: 4-byte VLAN header after Ethernet
-            if frame.len() < 18 {
+        ETHERTYPE_IPV4 => ETHERNET_HEADER_LEN,
+        ETHERTYPE_VLAN_8021Q | ETHERTYPE_VLAN_8021AD => {
+            let vlan_frame_min = ETHERNET_HEADER_LEN.checked_add(VLAN_HEADER_LEN)?;
+            if frame.len() < vlan_frame_min {
                 return None;
             }
-            let inner_ethertype = u16::from_be_bytes([frame[16], frame[17]]);
-            if inner_ethertype != 0x0800 {
-                // VLAN present but not carrying IPv4
+
+            let inner_ethertype = read_be_u16_at(frame, VLAN_INNER_ETHERTYPE_OFFSET)?;
+            if inner_ethertype != ETHERTYPE_IPV4 {
                 return None;
             }
-            // IPv4 header starts after Ethernet (14) + VLAN (4)
-            18
+
+            vlan_frame_min
         }
-        _ => {
-            // Not IPv4 and not VLAN-with-IPv4
-            return None;
-        }
+        _ => return None,
     };
 
-    if frame.len() < ip_start + 20 + 8 {
-        // Not enough bytes for IPv4 min header + UDP header
+    let ip_and_udp_min = ip_start
+        .checked_add(IPV4_MIN_HEADER_LEN)?
+        .checked_add(UDP_HEADER_LEN)?;
+    if frame.len() < ip_and_udp_min {
         return None;
     }
 
-    // IPv4 header length (low 4 bits of first byte, in 32-bit words)
-    let ihl_words = frame[ip_start] & 0x0f;
-    let ip_header_len = (ihl_words as usize) * 4;
-
-    if frame.len() < ip_start + ip_header_len + 8 {
+    let ip_first_byte = read_u8_at(frame, ip_start)?;
+    let ihl_words = ip_first_byte & 0x0f;
+    let ip_header_len = usize::from(ihl_words).checked_mul(4)?;
+    if ip_header_len < IPV4_MIN_HEADER_LEN {
         return None;
     }
 
-    // Protocol field at offset 9 of IPv4 header
-    let protocol = frame[ip_start + 9];
-    if protocol != 17 {
-        // Not UDP
+    let protocol_offset = ip_start.checked_add(IPV4_PROTOCOL_FIELD_OFFSET)?;
+    let protocol = read_u8_at(frame, protocol_offset)?;
+    if protocol != IP_PROTOCOL_UDP {
         return None;
     }
 
-    let udp_start = ip_start + ip_header_len;
-
-    // UDP length field (includes UDP header)
-    let udp_len =
-        u16::from_be_bytes([frame[udp_start + 4], frame[udp_start + 5]]) as usize;
-    if udp_len < 8 {
+    let udp_start = ip_start.checked_add(ip_header_len)?;
+    let udp_len_field_offset = udp_start.checked_add(UDP_LENGTH_FIELD_OFFSET)?;
+    let udp_len = usize::from(read_be_u16_at(frame, udp_len_field_offset)?);
+    if udp_len < UDP_HEADER_LEN {
         return None;
     }
 
-    let payload_start = udp_start + 8;
-    let payload_len = udp_len - 8;
-
-    // Clamp to frame length just in case snaplen < full UDP_length
+    let payload_start = udp_start.checked_add(UDP_HEADER_LEN)?;
+    let payload_len = udp_len.checked_sub(UDP_HEADER_LEN)?;
     let payload_end = payload_start.checked_add(payload_len)?;
+
     if payload_end > frame.len() {
         return None;
     }
 
-    Some(&frame[payload_start..payload_end])
+    frame.get(payload_start..payload_end)
 }
 
-/// Read the OPRA Block header just enough to get the message count.
-///
-/// Layout (all integers big-endian):
-///   0..2   Block Size (u16)
-///   2      Data Feed Indicator (u8, ASCII 'O')
-///   3      Retransmission Indicator (u8, ' ' or 'V')
-///   4      Session Indicator (u8)
-///   5..9   Block Sequence Number (u32)
-///   9      Messages In Block (u8)
-///   10..18 Block Timestamp (seconds + nanoseconds, u32 + u32)
-///   18..21 Block Checksum (u16)
+#[must_use]
 fn count_opra_messages(udp_payload: &[u8]) -> Option<u8> {
-    const OPRA_BLOCK_HEADER_LEN: usize = 21;
-
     if udp_payload.len() < OPRA_BLOCK_HEADER_LEN {
         return None;
     }
 
-    // Block size is number of bytes in this OPRA block (header + data + optional pad).
-    let block_size = u16::from_be_bytes([udp_payload[0], udp_payload[1]]) as usize;
+    let block_size = usize::from(read_be_u16_at(udp_payload, 0)?);
     if block_size == 0 || block_size > udp_payload.len() {
         return None;
     }
 
-    let messages_in_block = udp_payload[9];
+    read_u8_at(udp_payload, OPRA_MESSAGES_IN_BLOCK_OFFSET)
+}
 
-    Some(messages_in_block)
+#[must_use]
+fn read_u8_at(data: &[u8], offset: usize) -> Option<u8> {
+    data.get(offset).copied()
+}
+
+#[must_use]
+fn read_be_u16_at(data: &[u8], offset: usize) -> Option<u16> {
+    let end = offset.checked_add(2)?;
+    let bytes = data.get(offset..end)?;
+    let array: [u8; 2] = bytes.try_into().ok()?;
+    Some(u16::from_be_bytes(array))
 }

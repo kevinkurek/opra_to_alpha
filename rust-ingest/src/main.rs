@@ -11,13 +11,13 @@ struct Args {
     /// Path to an OPRA PCAP file
     #[arg(long)]
     pcap: String,
-    /// s3://bucket/prefix for bronze output (Parquet/Arrow IPC)
+    /// <s3://bucket/prefix> for bronze output (Parquet/Arrow IPC)
     #[arg(long)]
     bucket: String,
     /// Iceberg REST catalog endpoint (optional in skeleton)
     #[arg(long, default_value_t=String::from("http://localhost:8181"))]
     iceberg_catalog: String,
-    /// MinIO/S3 endpoint (http://host:9000)
+    /// MinIO/S3 endpoint <http://host:9000>
     #[arg(long, default_value_t=String::from("http://127.0.0.1:9000"))]
     minio_endpoint: String,
     #[arg(long, default_value_t=String::from("minioadmin"))]
@@ -37,7 +37,7 @@ struct Args {
 
 #[tokio::main()]
 async fn main() -> Result<()> {
-    telemetry::init()?;
+    telemetry::init();
     let args = Args::parse();
     info!("starting ingest: {:?}", args);
 
@@ -87,8 +87,8 @@ fn parse_s3_url(url: &str) -> Result<(String, String)> {
 
 fn normalize_prefix(p: &str) -> String {
     match p {
-        "" => "".to_string(),
+        "" => String::new(),
         s if s.ends_with('/') => s.to_string(),
-        s => format!("{}/", s),
+        s => format!("{s}/"),
     }
 }
