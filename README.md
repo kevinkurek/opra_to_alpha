@@ -262,6 +262,9 @@ cd ..
 
 # Dry-run with cargo
 cargo run --release -- --pcap ./pcap_samples/ny4-opra-new-a-20230822T143000.pcap   --bucket s3://market/bronze/opra_pcap/   --minio-endpoint http://127.0.0.1:9000   --access-key minioadmin   --secret-key minioadmin   --parallel 4   --row-group-bytes 134217728  --dry-run
+>>
+2026-02-25T03:12:31.862594Z  INFO opra_pcap_replayer: decoded 79920468 packets, 0 messages (skeleton)
+2026-02-25T03:12:31.862617Z  INFO opra_pcap_replayer: dry run complete
 
 # Real run with cargo
 cargo run --release -- --pcap ./pcap_samples/ny4-opra-new-a-20230822T143000.pcap   --bucket s3://market/bronze/opra_pcap/   --minio-endpoint http://127.0.0.1:9000   --access-key minioadmin   --secret-key minioadmin   --parallel 4   --row-group-bytes 134217728
@@ -271,6 +274,11 @@ target/release/opra-pcap-replayer   --pcap ./pcap_samples/ny4-opra-new-a-2023082
 
 # Run real directly with the compiled binary (after cargo build --release)
 target/release/opra-pcap-replayer   --pcap ./pcap_samples/ny4-opra-new-a-20230822T143000.pcap   --bucket s3://market/bronze/opra_pcap/   --minio-endpoint http://127.0.0.1:9000   --access-key minioadmin   --secret-key minioadmin   --parallel 4   --row-group-bytes 134217728
+
+# TESTS WITH RAYON
+# RAYON_NUM_THREADS=1 cargo run --release -- ... --dry-run ~ 33:07-33:19= ~ 12 seconds
+# RAYON_NUM_THREADS=4 cargo run --release -- ... --dry-run 
+# RAYON_NUM_THREADS=8 cargo run --release -- ... --dry-run ~ 52.27-01.8 = ~ 9 seconds
 ```
 
 Real Run Expected output:

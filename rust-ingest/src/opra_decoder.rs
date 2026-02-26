@@ -2,6 +2,7 @@ use anyhow::{anyhow, Result};
 use pcap_parser::{PcapBlock, PcapCapture, Capture};
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
+use rayon::prelude::*;
 
 const ETHERNET_HEADER_LEN: usize = 14;
 const VLAN_HEADER_LEN: usize = 4;
@@ -36,21 +37,39 @@ pub async fn decode_pcap(path: &str, _parallel: usize) -> Result<DecodeStats> {
     let capture = PcapCapture::from_file(&buffer)
         .map_err(|error| anyhow!("failed to parse pcap: {error}"))?;
 
-    let mut stats = DecodeStats::default();
+    // Collect frames first because `capture.iter()` is an iterator; Rayon needs a splittable collection.
+    // These are borrowed slices into `buffer`, so this is not copying packet bytes.
+    let legacy_frames: Vec<&[u8]> = capture
+        .iter()
+        .filter_map(|block| match block {
+            PcapBlock::Legacy(legacy) => Some(legacy.data),
+            _ => None,
+        })
+        .collect();
 
-    for block in capture.iter() {
-        if let PcapBlock::Legacy(legacy) = block {
-            stats.packets = stats.packets.saturating_add(1);
+    let stats = legacy_frames
+        .par_iter()
+        .map(|&frame| {
+            let mut local = DecodeStats::default();
 
-            if let Some(udp_payload) = extract_udp_payload(legacy.data) {
+            // Count the legacy packet regardless of whether it contains IPv4/UDP/OPRA.
+            local.packets = local.packets.saturating_add(1);
+
+            if let Some(udp_payload) = extract_udp_payload(frame) {
                 if let Some(message_count) = count_opra_messages(udp_payload) {
-                    stats.messages = stats.messages.saturating_add(u64::from(message_count));
+                    local.messages = local
+                        .messages
+                        .saturating_add(u64::from(message_count));
                 }
-
-                // parse_opra_block(udp_payload, &mut stats)
             }
-        }
-    }
+
+            local
+        })
+        .reduce(DecodeStats::default, |mut acc, local| {
+            acc.packets = acc.packets.saturating_add(local.packets);
+            acc.messages = acc.messages.saturating_add(local.messages);
+            acc
+        });
 
     Ok(stats)
 }
