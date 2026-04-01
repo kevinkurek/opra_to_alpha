@@ -6,6 +6,9 @@
 /rust-injest/target/*
 // ...existing code...
 
+# parquet files
+*.parquet
+
 # pcap files
 *.pcap
 *.zst

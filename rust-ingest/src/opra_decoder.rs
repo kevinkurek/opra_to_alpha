@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Result};
 use pcap_parser::{PcapBlock, PcapCapture, Capture};
+use rayon::{prelude::*, ThreadPoolBuilder};
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
-use rayon::prelude::*;
 
 const ETHERNET_HEADER_LEN: usize = 14;
 const VLAN_HEADER_LEN: usize = 4;
@@ -20,7 +20,10 @@ const ETHERTYPE_VLAN_8021AD: u16 = 0x88a8;
 const IP_PROTOCOL_UDP: u8 = 17;
 
 const OPRA_BLOCK_HEADER_LEN: usize = 21;
-const OPRA_MESSAGES_IN_BLOCK_OFFSET: usize = 9;
+const OPRA_BLOCK_SIZE_OFFSET: usize = 1;
+const OPRA_MESSAGES_IN_BLOCK_OFFSET: usize = 10;
+const OPRA_DATA_FEED_INDICATOR_OFFSET: usize = 3;
+const OPRA_DATA_FEED_INDICATOR: u8 = b'O';
 
 #[derive(Debug, Default)]
 pub struct DecodeStats {
@@ -28,13 +31,36 @@ pub struct DecodeStats {
     pub messages: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct ParsedOpraRow {
+    pub packet_index: u64,
+    pub udp_payload_len: u64,
+    pub block_size: u64,
+    pub messages_in_block: u64,
+}
+
 /// Skeleton decoder: replace with real OPRA Pillar parsing.
-pub async fn decode_pcap(path: &str, _parallel: usize) -> Result<DecodeStats> {
+pub async fn read_pcap_file(path: &str) -> Result<Vec<u8>> {
     let mut file = File::open(path).await?;
     let mut buffer = Vec::new();
     file.read_to_end(&mut buffer).await?;
+    Ok(buffer)
+}
 
-    let capture = PcapCapture::from_file(&buffer)
+/// Synchronous decode over already-loaded PCAP bytes.
+pub fn decode_pcap(buffer: &[u8]) -> Result<(DecodeStats, Vec<ParsedOpraRow>)> {
+    let parallel = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1);
+    decode_pcap_with_parallelism(buffer, parallel)
+}
+
+/// Synchronous decode over already-loaded PCAP bytes with explicit thread count.
+pub fn decode_pcap_with_parallelism(
+    buffer: &[u8],
+    parallel: usize,
+) -> Result<(DecodeStats, Vec<ParsedOpraRow>)> {
+    let capture = PcapCapture::from_file(buffer)
         .map_err(|error| anyhow!("failed to parse pcap: {error}"))?;
 
     // Collect frames first because `capture.iter()` is an iterator; Rayon needs a splittable collection.
@@ -47,31 +73,75 @@ pub async fn decode_pcap(path: &str, _parallel: usize) -> Result<DecodeStats> {
         })
         .collect();
 
-    let stats = legacy_frames
-        .par_iter()
-        .map(|&frame| {
-            let mut local = DecodeStats::default();
+    let (stats, mut rows) = if parallel > 1 {
+        ThreadPoolBuilder::new()
+            .num_threads(parallel)
+            .build()
+            .map_err(|error| anyhow!("failed to build rayon pool: {error}"))?
+            .install(|| {
+                legacy_frames
+                    .par_iter()
+                    .enumerate()
+                    .map(|(packet_index, &frame)| {
+                        let (stats, row) = decode_legacy_frame(packet_index, frame);
+                        let rows = row.into_iter().collect::<Vec<_>>();
+                        (stats, rows)
+                    })
+                    .reduce(
+                        || (DecodeStats::default(), Vec::new()),
+                        |(mut acc_stats, mut acc_rows), (local_stats, mut local_rows)| {
+                            acc_stats.packets = acc_stats.packets.saturating_add(local_stats.packets);
+                            acc_stats.messages =
+                                acc_stats.messages.saturating_add(local_stats.messages);
+                            acc_rows.append(&mut local_rows);
+                            (acc_stats, acc_rows)
+                        },
+                    )
+            })
+    } else {
+        legacy_frames
+            .iter()
+            .enumerate()
+            .map(|(packet_index, &frame)| decode_legacy_frame(packet_index, frame))
+            .fold(
+                (DecodeStats::default(), Vec::new()),
+                |(mut acc_stats, mut acc_rows), (local_stats, local_row)| {
+                    acc_stats.packets = acc_stats.packets.saturating_add(local_stats.packets);
+                    acc_stats.messages = acc_stats.messages.saturating_add(local_stats.messages);
+                    if let Some(row) = local_row {
+                        acc_rows.push(row);
+                    }
+                    (acc_stats, acc_rows)
+                },
+            )
+    };
 
-            // Count the legacy packet regardless of whether it contains IPv4/UDP/OPRA.
-            local.packets = local.packets.saturating_add(1);
+    // Keep row ordering stable for easier local inspection regardless of parallel execution order.
+    rows.sort_unstable_by_key(|row| row.packet_index);
 
-            if let Some(udp_payload) = extract_udp_payload(frame) {
-                if let Some(message_count) = count_opra_messages(udp_payload) {
-                    local.messages = local
-                        .messages
-                        .saturating_add(u64::from(message_count));
-                }
-            }
+    Ok((stats, rows))
+}
 
-            local
-        })
-        .reduce(DecodeStats::default, |mut acc, local| {
-            acc.packets = acc.packets.saturating_add(local.packets);
-            acc.messages = acc.messages.saturating_add(local.messages);
-            acc
-        });
+fn decode_legacy_frame(packet_index: usize, frame: &[u8]) -> (DecodeStats, Option<ParsedOpraRow>) {
+    let mut local = DecodeStats::default();
 
-    Ok(stats)
+    // Count the legacy packet regardless of whether it contains IPv4/UDP/OPRA.
+    local.packets = local.packets.saturating_add(1);
+
+    let mut parsed_row = None;
+    if let Some(udp_payload) = extract_udp_payload(frame) {
+        if let Some((block_size, message_count)) = parse_opra_block_header(udp_payload) {
+            local.messages = local.messages.saturating_add(u64::from(message_count));
+            parsed_row = Some(ParsedOpraRow {
+                packet_index: u64::try_from(packet_index).unwrap_or(u64::MAX),
+                udp_payload_len: u64::try_from(udp_payload.len()).unwrap_or(u64::MAX),
+                block_size: u64::from(block_size),
+                messages_in_block: u64::from(message_count),
+            });
+        }
+    }
+
+    (local, parsed_row)
 }
 
 #[must_use]
@@ -141,17 +211,28 @@ fn extract_udp_payload(frame: &[u8]) -> Option<&[u8]> {
 }
 
 #[must_use]
-fn count_opra_messages(udp_payload: &[u8]) -> Option<u8> {
+fn parse_opra_block_header(udp_payload: &[u8]) -> Option<(u16, u8)> {
     if udp_payload.len() < OPRA_BLOCK_HEADER_LEN {
         return None;
     }
 
-    let block_size = usize::from(read_be_u16_at(udp_payload, 0)?);
-    if block_size == 0 || block_size > udp_payload.len() {
+    // OPRA packets observed in this feed have:
+    // - block size at byte offsets [1..=2] (big-endian)
+    // - data feed indicator 'O' at byte offset 3
+    // - messages-in-block at byte offset 10
+    let block_size = read_be_u16_at(udp_payload, OPRA_BLOCK_SIZE_OFFSET)?;
+    let block_size_usize = usize::from(block_size);
+    if block_size_usize == 0 || block_size_usize > udp_payload.len() {
         return None;
     }
 
-    read_u8_at(udp_payload, OPRA_MESSAGES_IN_BLOCK_OFFSET)
+    let feed_indicator = read_u8_at(udp_payload, OPRA_DATA_FEED_INDICATOR_OFFSET)?;
+    if feed_indicator != OPRA_DATA_FEED_INDICATOR {
+        return None;
+    }
+
+    let message_count = read_u8_at(udp_payload, OPRA_MESSAGES_IN_BLOCK_OFFSET)?;
+    Some((block_size, message_count))
 }
 
 #[must_use]

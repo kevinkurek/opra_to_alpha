@@ -1,5 +1,6 @@
 use clap::Parser;
-use anyhow::Result;
+use anyhow::{Context, Result};
+use std::path::Path;
 use tracing::info;
 mod telemetry;
 mod opra_decoder;
@@ -11,8 +12,8 @@ struct Args {
     /// Path to an OPRA PCAP file
     #[arg(long)]
     pcap: String,
-    /// <s3://bucket/prefix> for bronze output (Parquet/Arrow IPC)
-    #[arg(long)]
+    /// Reserved for future cloud upload flow (currently local-only output).
+    #[arg(long, default_value_t=String::from("s3://unused/local"))]
     bucket: String,
     /// Iceberg REST catalog endpoint (optional in skeleton)
     #[arg(long, default_value_t=String::from("http://localhost:8181"))]
@@ -24,9 +25,6 @@ struct Args {
     access_key: String,
     #[arg(long, default_value_t=String::from("minioadmin"))]
     secret_key: String,
-    /// Parallel decode workers
-    #[arg(long, default_value_t=4)]
-    parallel: usize,
     /// Parquet row group target size (bytes)
     #[arg(long, default_value_t=128*1024*1024)]
     row_group_bytes: usize,
@@ -41,54 +39,37 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     info!("starting ingest: {:?}", args);
 
-    let stats = opra_decoder::decode_pcap(&args.pcap, args.parallel).await?;
-    info!("decoded {} packets, {} messages (skeleton)", stats.packets, stats.messages);
+    // Async ability to read bytes from N files at once; dev is just on 1 file
+    let pcap_bytes = opra_decoder::read_pcap_file(&args.pcap).await?;
+
+    // Local-first decode flow for parser development.
+    let (stats, rows) = tokio::task::spawn_blocking(move ||
+        opra_decoder::decode_pcap(&pcap_bytes))
+        .await
+        .context("row decode task failed to join")??;
+    info!(
+        "decoded {} packets, {} messages (skeleton), {} parsed rows",
+        stats.packets,
+        stats.messages,
+        rows.len()
+    );
 
     if args.dry_run {
         info!("dry run complete");
         return Ok(());
     }
 
-    // 1) Write demo parquet locally (replace with real batches later)
-    let local_path = "./pcap_samples/demo_bronze.parquet";
-    let local_path = arrow_sink::write_demo_parquet(local_path)?;
-    info!("wrote {:?}", &local_path);
-
-    // 2) Parse s3 URL like s3://market/bronze/opra_pcap/
-    let (bucket, prefix) = parse_s3_url(&args.bucket)?;
-    // simple object key name
-    let ts_key = format!("{}demo_bronze.parquet", normalize_prefix(&prefix));
-
-    // 3) Upload to MinIO
-    arrow_sink::upload_to_minio(
-        &args.minio_endpoint,
-        &args.access_key,
-        &args.secret_key,
-        &bucket,
-        &ts_key,
-        &local_path,
-    ).await?;
-
-    info!("uploaded to s3://{}/{}", bucket, ts_key);
+    let local_path = local_parquet_output_path(&args.pcap);
+    let local_path = arrow_sink::write_parsed_parquet(&local_path, &rows)?;
+    info!("wrote {:?} with {} parsed rows", &local_path, rows.len());
     Ok(())
 }
 
-fn parse_s3_url(url: &str) -> Result<(String, String)> {
-    // expect s3://bucket/prefix/...
-    let u = url.strip_prefix("s3://").ok_or_else(|| anyhow::anyhow!("bucket must start with s3://"))?;
-    let mut parts = u.splitn(2, '/');
-    let bucket = parts.next().unwrap_or_default().to_string();
-    let prefix = parts.next().unwrap_or("").to_string();
-    if bucket.is_empty() {
-        return Err(anyhow::anyhow!("missing bucket name"));
-    }
-    Ok((bucket, prefix))
-}
-
-fn normalize_prefix(p: &str) -> String {
-    match p {
-        "" => String::new(),
-        s if s.ends_with('/') => s.to_string(),
-        s => format!("{s}/"),
-    }
+fn local_parquet_output_path(pcap_path: &str) -> String {
+    let stem = Path::new(pcap_path)
+        .file_stem()
+        .and_then(std::ffi::OsStr::to_str)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("opra");
+    format!("./pcap_samples/{}_parsed.parquet", stem)
 }

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use arrow::array::{Int64Builder, StringBuilder};
+use arrow::array::{Int64Builder, StringBuilder, UInt64Builder};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -7,6 +7,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::info;
+use crate::opra_decoder::ParsedOpraRow;
 
 pub fn write_demo_parquet(path: &str) -> Result<PathBuf> {
 
@@ -25,6 +26,45 @@ pub fn write_demo_parquet(path: &str) -> Result<PathBuf> {
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![Arc::new(sym.finish()), Arc::new(cnt.finish())],
+    )?;
+
+    let file = File::create(path)?;
+    let mut writer = ArrowWriter::try_new(file, schema, None)?;
+    writer.write(&batch)?;
+    writer.close()?;
+    Ok(PathBuf::from(path))
+}
+
+pub fn write_parsed_parquet(path: &str, rows: &[ParsedOpraRow]) -> Result<PathBuf> {
+    info!("writing parsed parquet to {:?} with {} rows", path, rows.len());
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("packet_index", DataType::UInt64, false),
+        Field::new("udp_payload_len", DataType::UInt64, false),
+        Field::new("block_size", DataType::UInt64, false),
+        Field::new("messages_in_block", DataType::UInt64, false),
+    ]));
+
+    let mut packet_index = UInt64Builder::new();
+    let mut udp_payload_len = UInt64Builder::new();
+    let mut block_size = UInt64Builder::new();
+    let mut messages_in_block = UInt64Builder::new();
+
+    for row in rows {
+        packet_index.append_value(row.packet_index);
+        udp_payload_len.append_value(row.udp_payload_len);
+        block_size.append_value(row.block_size);
+        messages_in_block.append_value(row.messages_in_block);
+    }
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(packet_index.finish()),
+            Arc::new(udp_payload_len.finish()),
+            Arc::new(block_size.finish()),
+            Arc::new(messages_in_block.finish()),
+        ],
     )?;
 
     let file = File::create(path)?;

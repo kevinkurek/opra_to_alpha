@@ -251,14 +251,42 @@ docker compose -f docker-compose-non-dev.yml up -d
 
 ---
 
+## 🦀 Rust Ingest Rayon vs Single-Threaded Performance
+
+Findings: The single-threaded run is faster than Rayon for smaller PCAP workloads. For example on 10k packet PCAPs, single-threaded completes in ~119.75us while Rayon with 12 threads takes ~402.75us.
+However, as the PCAP workload increased in file sizes closer to 10 million, Rayon performed that in 180 ms, whereas the single-threaded performed it in 211 ms.
+It seems that Rayon is the winner as PCAP file sizes grow larger.
+
+```bash
+# get a workable sized PCAP to test on
+tcpdump -r pcap_samples/ny4-opra-new-a-20230822T143000.pcap -c 1000000 -w pcap_samples/ny4-small-1m.pcap
+
+# run the benchmark
+cd rust-ingest
+
+# run all 3 files; 10k, 1m, and 10m pcap samples
+cargo bench --bench decode_pcap -- --noplot --sample-size 100
+
+# single-file override
+OPRA_BENCH_PCAP=pcap_samples/ny4-small-10k.pcap cargo bench --bench decode_pcap -- --noplot --sample-size 100 --measurement-time 2
+```
+
+
+
+---
+
 ## 🦀 Rust Ingest (OPRA PCAP → Parquet → MinIO)
 
 ```bash
 cd rust-ingest
 cargo build --release # release build for better performance
 cd pcap_samples
-unzstd ny4-opra-new-a-20230822T143000.pcap
+unzstd ny4-opra-new-a-20230822T143000.pcap.zst # unzip the zst file to get the pcap
 cd ..
+
+# most simple dev on 1m pcap
+cargo run --release -- --pcap ./pcap_samples/ny4-small-1m.pcap --bucket s3://market/bronze/opra_pcap/ --dry-run
+
 
 # Dry-run with cargo
 cargo run --release -- --pcap ./pcap_samples/ny4-opra-new-a-20230822T143000.pcap   --bucket s3://market/bronze/opra_pcap/   --minio-endpoint http://127.0.0.1:9000   --access-key minioadmin   --secret-key minioadmin   --parallel 4   --row-group-bytes 134217728  --dry-run
@@ -274,11 +302,6 @@ target/release/opra-pcap-replayer   --pcap ./pcap_samples/ny4-opra-new-a-2023082
 
 # Run real directly with the compiled binary (after cargo build --release)
 target/release/opra-pcap-replayer   --pcap ./pcap_samples/ny4-opra-new-a-20230822T143000.pcap   --bucket s3://market/bronze/opra_pcap/   --minio-endpoint http://127.0.0.1:9000   --access-key minioadmin   --secret-key minioadmin   --parallel 4   --row-group-bytes 134217728
-
-# TESTS WITH RAYON
-# RAYON_NUM_THREADS=1 cargo run --release -- ... --dry-run ~ 33:07-33:19= ~ 12 seconds
-# RAYON_NUM_THREADS=4 cargo run --release -- ... --dry-run 
-# RAYON_NUM_THREADS=8 cargo run --release -- ... --dry-run ~ 52.27-01.8 = ~ 9 seconds
 ```
 
 Real Run Expected output:

@@ -23,6 +23,13 @@ aws-config = "1"
 aws-sdk-s3 = "1"
 rayon = "1.5"
 
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "decode_pcap"
+harness = false
+
 [profile.dev]
 opt-level = 0
 debug = 2
