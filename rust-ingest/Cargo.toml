@@ -25,6 +25,7 @@ rayon = "1.5"
 
 [dev-dependencies]
 criterion = "0.5"
+hex = "0.4"
 
 [[bench]]
 name = "decode_pcap"

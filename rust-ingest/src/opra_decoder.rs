@@ -39,6 +39,46 @@ pub struct ParsedOpraRow {
     pub messages_in_block: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct DecodedTradeRow {
+    pub packet_index: u64,
+    pub block_sequence: u64,
+    pub block_timestamp_ns: u64,
+    pub message_index_in_block: u64,
+    pub participant: String,
+    pub category: String,
+    pub type_code: String,
+    pub indicator: String,
+    pub symbol_root: Option<String>,
+    pub osi_symbol: Option<String>,
+    pub bid: Option<f64>,
+    pub ask: Option<f64>,
+    pub bid_size: Option<u64>,
+    pub ask_size: Option<u64>,
+    pub price: Option<f64>,
+    pub size: Option<u64>,
+    pub side: Option<String>,
+    pub action: Option<String>,
+    pub flags: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ParsedBlockHeader {
+    block_size: u16,
+    messages_in_block: u8,
+    block_sequence: u32,
+    block_ts_sec: u32,
+    block_ts_nsec: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ParsedMessageHeader {
+    participant: u8,
+    category: u8,
+    type_code: u8,
+    indicator: u8,
+}
+
 /// Skeleton decoder: replace with real OPRA Pillar parsing.
 pub async fn read_pcap_file(path: &str) -> Result<Vec<u8>> {
     let mut file = File::open(path).await?;
@@ -73,7 +113,7 @@ pub fn decode_pcap_with_parallelism(
         })
         .collect();
 
-    let (stats, mut rows) = if parallel > 1 {
+    let (stats, mut rows) =
         ThreadPoolBuilder::new()
             .num_threads(parallel)
             .build()
@@ -97,29 +137,47 @@ pub fn decode_pcap_with_parallelism(
                             (acc_stats, acc_rows)
                         },
                     )
-            })
-    } else {
-        legacy_frames
-            .iter()
-            .enumerate()
-            .map(|(packet_index, &frame)| decode_legacy_frame(packet_index, frame))
-            .fold(
-                (DecodeStats::default(), Vec::new()),
-                |(mut acc_stats, mut acc_rows), (local_stats, local_row)| {
-                    acc_stats.packets = acc_stats.packets.saturating_add(local_stats.packets);
-                    acc_stats.messages = acc_stats.messages.saturating_add(local_stats.messages);
-                    if let Some(row) = local_row {
-                        acc_rows.push(row);
-                    }
-                    (acc_stats, acc_rows)
-                },
-            )
-    };
+            });
 
     // Keep row ordering stable for easier local inspection regardless of parallel execution order.
     rows.sort_unstable_by_key(|row| row.packet_index);
 
     Ok((stats, rows))
+}
+
+/// Decode quote/trade-like OPRA message rows in parallel for research workflows.
+pub fn decode_trades_with_parallelism(
+    buffer: &[u8],
+    parallel: usize,
+) -> Result<Vec<DecodedTradeRow>> {
+    let capture = PcapCapture::from_file(buffer)
+        .map_err(|error| anyhow!("failed to parse pcap: {error}"))?;
+
+    let legacy_frames: Vec<&[u8]> = capture
+        .iter()
+        .filter_map(|block| match block {
+            PcapBlock::Legacy(legacy) => Some(legacy.data),
+            _ => None,
+        })
+        .collect();
+
+    let mut rows = ThreadPoolBuilder::new()
+        .num_threads(parallel)
+        .build()
+        .map_err(|error| anyhow!("failed to build rayon pool: {error}"))?
+        .install(|| {
+            legacy_frames
+                .par_iter()
+                .enumerate()
+                .map(|(packet_index, &frame)| decode_trade_rows_from_frame(packet_index, frame))
+                .reduce(Vec::new, |mut acc, mut local| {
+                    acc.append(&mut local);
+                    acc
+                })
+        });
+
+    rows.sort_unstable_by_key(|row| (row.packet_index, row.message_index_in_block));
+    Ok(rows)
 }
 
 fn decode_legacy_frame(packet_index: usize, frame: &[u8]) -> (DecodeStats, Option<ParsedOpraRow>) {
@@ -142,6 +200,53 @@ fn decode_legacy_frame(packet_index: usize, frame: &[u8]) -> (DecodeStats, Optio
     }
 
     (local, parsed_row)
+}
+
+fn decode_trade_rows_from_frame(packet_index: usize, frame: &[u8]) -> Vec<DecodedTradeRow> {
+    let Some(udp_payload) = extract_udp_payload(frame) else {
+        return Vec::new();
+    };
+    let Some(block_header) = parse_block_header(udp_payload) else {
+        return Vec::new();
+    };
+    let Some(messages_slice) = udp_payload.get(OPRA_BLOCK_HEADER_LEN..usize::from(block_header.block_size)) else {
+        return Vec::new();
+    };
+
+    let msg_count = usize::from(block_header.messages_in_block);
+    if msg_count == 0 || messages_slice.len() % msg_count != 0 {
+        return Vec::new();
+    }
+
+    let msg_len = messages_slice.len() / msg_count;
+    if msg_len < 12 {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    for message_index in 0..msg_count {
+        let start = message_index.saturating_mul(msg_len);
+        let end = start.saturating_add(msg_len);
+        let Some(message_bytes) = messages_slice.get(start..end) else {
+            continue;
+        };
+        let Some(header) = parse_message_header(message_bytes) else {
+            continue;
+        };
+
+        // v1: port notebook logic for "q" and "k" categories first.
+        // These are quote-like OPRA rows but give a structured and research-ready decoding path.
+        let row = match header.category {
+            b'q' => parse_short_quote_row(packet_index, message_index, block_header, header, message_bytes),
+            b'k' => parse_long_quote_row(packet_index, message_index, block_header, header, message_bytes),
+            _ => None,
+        };
+        if let Some(row) = row {
+            out.push(row);
+        }
+    }
+
+    out
 }
 
 #[must_use]
@@ -212,6 +317,12 @@ fn extract_udp_payload(frame: &[u8]) -> Option<&[u8]> {
 
 #[must_use]
 fn parse_opra_block_header(udp_payload: &[u8]) -> Option<(u16, u8)> {
+    let block_header = parse_block_header(udp_payload)?;
+    Some((block_header.block_size, block_header.messages_in_block))
+}
+
+#[must_use]
+fn parse_block_header(udp_payload: &[u8]) -> Option<ParsedBlockHeader> {
     if udp_payload.len() < OPRA_BLOCK_HEADER_LEN {
         return None;
     }
@@ -231,8 +342,214 @@ fn parse_opra_block_header(udp_payload: &[u8]) -> Option<(u16, u8)> {
         return None;
     }
 
-    let message_count = read_u8_at(udp_payload, OPRA_MESSAGES_IN_BLOCK_OFFSET)?;
-    Some((block_size, message_count))
+    let messages_in_block = read_u8_at(udp_payload, OPRA_MESSAGES_IN_BLOCK_OFFSET)?;
+    let block_sequence_hi = u32::from(read_be_u16_at(udp_payload, 6)?);
+    let block_sequence_lo = u32::from(read_be_u16_at(udp_payload, 8)?);
+    let block_sequence = (block_sequence_hi << 16) | block_sequence_lo;
+    let block_ts_sec_hi = u32::from(read_be_u16_at(udp_payload, 11)?);
+    let block_ts_sec_lo = u32::from(read_be_u16_at(udp_payload, 13)?);
+    let block_ts_sec = (block_ts_sec_hi << 16) | block_ts_sec_lo;
+    let block_ts_nsec_hi = u32::from(read_be_u16_at(udp_payload, 15)?);
+    let block_ts_nsec_lo = u32::from(read_be_u16_at(udp_payload, 17)?);
+    let block_ts_nsec = (block_ts_nsec_hi << 16) | block_ts_nsec_lo;
+
+    Some(ParsedBlockHeader {
+        block_size,
+        messages_in_block,
+        block_sequence,
+        block_ts_sec,
+        block_ts_nsec,
+    })
+}
+
+#[must_use]
+fn parse_message_header(message: &[u8]) -> Option<ParsedMessageHeader> {
+    if message.len() < 12 {
+        return None;
+    }
+    Some(ParsedMessageHeader {
+        participant: *message.first()?,
+        category: *message.get(1)?,
+        type_code: *message.get(2)?,
+        indicator: *message.get(3)?,
+    })
+}
+
+fn parse_short_quote_row(
+    packet_index: usize,
+    message_index: usize,
+    block: ParsedBlockHeader,
+    header: ParsedMessageHeader,
+    message: &[u8],
+) -> Option<DecodedTradeRow> {
+    // 12-byte OPRA message header + 17-byte short quote body in observed data.
+    if message.len() < 29 {
+        return None;
+    }
+    let body = message.get(12..29)?;
+
+    let symbol_raw = body.get(0..4)?;
+    let symbol_root = std::str::from_utf8(symbol_raw).ok()?.trim_end().to_string();
+    let exp = body.get(4..7)?;
+    let strike_raw = read_be_u16_at(body, 7)?;
+    let bid_raw = read_be_u16_at(body, 9)?;
+    let bid_size_raw = read_be_u16_at(body, 11)?;
+    let ask_raw = read_be_u16_at(body, 13)?;
+    let ask_size_raw = read_be_u16_at(body, 15)?;
+
+    let (yymmdd, cp) = decode_exp_block(exp);
+    let strike = as_price_u16(strike_raw, b'A');
+    let osi_symbol = build_osi_symbol(&symbol_root, &yymmdd, cp, strike);
+    let flags = Some(u64::from(read_be_u16_at(body, 15)?));
+
+    Some(DecodedTradeRow {
+        packet_index: u64::try_from(packet_index).unwrap_or(u64::MAX),
+        block_sequence: u64::from(block.block_sequence),
+        block_timestamp_ns: u64::from(block.block_ts_sec)
+            .saturating_mul(1_000_000_000)
+            .saturating_add(u64::from(block.block_ts_nsec)),
+        message_index_in_block: u64::try_from(message_index).unwrap_or(u64::MAX),
+        participant: char::from(header.participant).to_string(),
+        category: char::from(header.category).to_string(),
+        type_code: char::from(header.type_code).to_string(),
+        indicator: char::from(header.indicator).to_string(),
+        symbol_root: Some(symbol_root),
+        osi_symbol: Some(osi_symbol),
+        bid: Some(as_price_u16(bid_raw, b'B')),
+        ask: Some(as_price_u16(ask_raw, b'B')),
+        bid_size: Some(u64::from(bid_size_raw)),
+        ask_size: Some(u64::from(ask_size_raw)),
+        // Leave trade print fields empty for quote records.
+        price: None,
+        size: None,
+        side: None,
+        action: None,
+        flags,
+    })
+}
+
+fn parse_long_quote_row(
+    packet_index: usize,
+    message_index: usize,
+    block: ParsedBlockHeader,
+    header: ParsedMessageHeader,
+    message: &[u8],
+) -> Option<DecodedTradeRow> {
+    // 12-byte OPRA header + 31-byte long quote body in notebook parser.
+    if message.len() < 43 {
+        return None;
+    }
+    let body = message.get(12..43)?;
+    let symbol_raw = body.get(0..5)?;
+    let symbol_root = std::str::from_utf8(symbol_raw).ok()?.trim_end().to_string();
+    let exp = body.get(6..9)?;
+    let strike_den = *body.get(9)?;
+    let strike_raw = read_be_u32_at(body, 10)?;
+    let bid_raw = read_be_u32_at(body, 15)?;
+    let bid_size_raw = read_be_u32_at(body, 19)?;
+    let ask_raw = read_be_u32_at(body, 23)?;
+    let ask_size_raw = read_be_u32_at(body, 27)?;
+
+    let (yymmdd, cp) = decode_exp_block(exp);
+    let strike = as_price_u32(strike_raw, strike_den);
+    let osi_symbol = build_osi_symbol(&symbol_root, &yymmdd, cp, strike);
+
+    Some(DecodedTradeRow {
+        packet_index: u64::try_from(packet_index).unwrap_or(u64::MAX),
+        block_sequence: u64::from(block.block_sequence),
+        block_timestamp_ns: u64::from(block.block_ts_sec)
+            .saturating_mul(1_000_000_000)
+            .saturating_add(u64::from(block.block_ts_nsec)),
+        message_index_in_block: u64::try_from(message_index).unwrap_or(u64::MAX),
+        participant: char::from(header.participant).to_string(),
+        category: char::from(header.category).to_string(),
+        type_code: char::from(header.type_code).to_string(),
+        indicator: char::from(header.indicator).to_string(),
+        symbol_root: Some(symbol_root),
+        osi_symbol: Some(osi_symbol),
+        bid: Some(as_price_u32(bid_raw, b'B')),
+        ask: Some(as_price_u32(ask_raw, b'B')),
+        bid_size: Some(u64::from(bid_size_raw)),
+        ask_size: Some(u64::from(ask_size_raw)),
+        price: None,
+        size: None,
+        side: None,
+        action: None,
+        flags: None,
+    })
+}
+
+fn decode_exp_block(exp_bytes: &[u8]) -> (String, char) {
+    let (month, cp) = match exp_bytes.first().copied().map(char::from) {
+        Some('A') => (1, 'C'),
+        Some('B') => (2, 'C'),
+        Some('C') => (3, 'C'),
+        Some('D') => (4, 'C'),
+        Some('E') => (5, 'C'),
+        Some('F') => (6, 'C'),
+        Some('G') => (7, 'C'),
+        Some('H') => (8, 'C'),
+        Some('I') => (9, 'C'),
+        Some('J') => (10, 'C'),
+        Some('K') => (11, 'C'),
+        Some('L') => (12, 'C'),
+        Some('M') => (1, 'P'),
+        Some('N') => (2, 'P'),
+        Some('O') => (3, 'P'),
+        Some('P') => (4, 'P'),
+        Some('Q') => (5, 'P'),
+        Some('R') => (6, 'P'),
+        Some('S') => (7, 'P'),
+        Some('T') => (8, 'P'),
+        Some('U') => (9, 'P'),
+        Some('V') => (10, 'P'),
+        Some('W') => (11, 'P'),
+        Some('X') => (12, 'P'),
+        _ => (0, '?'),
+    };
+
+    let day = exp_bytes.get(1).copied().unwrap_or_default();
+    let year = exp_bytes.get(2).copied().unwrap_or_default();
+    let yymmdd = format!("{year:02}{month:02}{day:02}");
+    (yymmdd, cp)
+}
+
+fn build_osi_symbol(root: &str, yymmdd: &str, cp: char, strike: f64) -> String {
+    let strike_int = (strike * 1000.0).round();
+    let strike_int = if strike_int.is_finite() && strike_int >= 0.0 {
+        strike_int as u64
+    } else {
+        0
+    };
+    format!("{root} {yymmdd}{cp}{strike_int:08}")
+}
+
+fn as_price_u16(raw: u16, den_code: u8) -> f64 {
+    let den = match den_code {
+        b'A' => 1_u32,
+        b'B' => 2_u32,
+        b'C' => 3_u32,
+        b'D' => 4_u32,
+        _ => 0_u32,
+    };
+    if den == 0 {
+        return f64::from(raw);
+    }
+    f64::from(raw) / 10_f64.powi(i32::try_from(den).unwrap_or(0))
+}
+
+fn as_price_u32(raw: u32, den_code: u8) -> f64 {
+    let den = match den_code {
+        b'A' => 1_u32,
+        b'B' => 2_u32,
+        b'C' => 3_u32,
+        b'D' => 4_u32,
+        _ => 0_u32,
+    };
+    if den == 0 {
+        return f64::from(raw);
+    }
+    f64::from(raw) / 10_f64.powi(i32::try_from(den).unwrap_or(0))
 }
 
 #[must_use]
@@ -246,4 +563,40 @@ fn read_be_u16_at(data: &[u8], offset: usize) -> Option<u16> {
     let bytes = data.get(offset..end)?;
     let array: [u8; 2] = bytes.try_into().ok()?;
     Some(u16::from_be_bytes(array))
+}
+
+#[must_use]
+fn read_be_u32_at(data: &[u8], offset: usize) -> Option<u32> {
+    let end = offset.checked_add(4)?;
+    let bytes = data.get(offset..end)?;
+    let array: [u8; 4] = bytes.try_into().ok()?;
+    Some(u32::from_be_bytes(array))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_block_header_known_payload() {
+        let payload = hex::decode("06006c4f20001530b0030364e4c6673b97bf001e7043714141410bcc433b932cc853505920541e17108600300136003201a243714141410bcc433b932cc8535059205416171126004e002d005001b243714141410bcc433b932cc853505920541917111c00e1007900e400c1").expect("hex decode");
+        let header = parse_block_header(&payload).expect("header");
+        assert_eq!(header.block_size, 108);
+        assert_eq!(header.messages_in_block, 3);
+        assert_eq!(header.block_sequence, 355_512_323);
+        assert_eq!(header.block_ts_sec, 1_692_714_599);
+    }
+
+    #[test]
+    fn decodes_exp_block_put() {
+        let (yymmdd, cp) = decode_exp_block(&[b'T', 30, 23]);
+        assert_eq!(yymmdd, "230830");
+        assert_eq!(cp, 'P');
+    }
+
+    #[test]
+    fn price_denominator_conversion() {
+        assert!((as_price_u16(423, b'B') - 4.23).abs() < 1e-9);
+        assert!((as_price_u32(123456, b'A') - 12345.6).abs() < 1e-9);
+    }
 }

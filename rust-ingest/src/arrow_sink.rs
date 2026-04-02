@@ -1,5 +1,5 @@
 use anyhow::Result;
-use arrow::array::{Int64Builder, StringBuilder, UInt64Builder};
+use arrow::array::{Float64Builder, Int64Builder, StringBuilder, UInt64Builder};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -7,7 +7,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::info;
-use crate::opra_decoder::ParsedOpraRow;
+use crate::opra_decoder::{DecodedTradeRow, ParsedOpraRow};
 
 pub fn write_demo_parquet(path: &str) -> Result<PathBuf> {
 
@@ -64,6 +64,150 @@ pub fn write_parsed_parquet(path: &str, rows: &[ParsedOpraRow]) -> Result<PathBu
             Arc::new(udp_payload_len.finish()),
             Arc::new(block_size.finish()),
             Arc::new(messages_in_block.finish()),
+        ],
+    )?;
+
+    let file = File::create(path)?;
+    let mut writer = ArrowWriter::try_new(file, schema, None)?;
+    writer.write(&batch)?;
+    writer.close()?;
+    Ok(PathBuf::from(path))
+}
+
+pub fn write_trades_parquet(path: &str, rows: &[DecodedTradeRow]) -> Result<PathBuf> {
+    info!("writing trades parquet to {:?} with {} rows", path, rows.len());
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("packet_index", DataType::UInt64, false),
+        Field::new("block_sequence", DataType::UInt64, false),
+        Field::new("block_timestamp_ns", DataType::UInt64, false),
+        Field::new("message_index_in_block", DataType::UInt64, false),
+        Field::new("participant", DataType::Utf8, false),
+        Field::new("category", DataType::Utf8, false),
+        Field::new("type_code", DataType::Utf8, false),
+        Field::new("indicator", DataType::Utf8, false),
+        Field::new("symbol_root", DataType::Utf8, true),
+        Field::new("osi_symbol", DataType::Utf8, true),
+        Field::new("bid", DataType::Float64, true),
+        Field::new("ask", DataType::Float64, true),
+        Field::new("bid_size", DataType::UInt64, true),
+        Field::new("ask_size", DataType::UInt64, true),
+        Field::new("price", DataType::Float64, true),
+        Field::new("size", DataType::UInt64, true),
+        Field::new("side", DataType::Utf8, true),
+        Field::new("action", DataType::Utf8, true),
+        Field::new("flags", DataType::UInt64, true),
+    ]));
+
+    let mut packet_index = UInt64Builder::new();
+    let mut block_sequence = UInt64Builder::new();
+    let mut block_timestamp_ns = UInt64Builder::new();
+    let mut message_index_in_block = UInt64Builder::new();
+    let mut participant = StringBuilder::new();
+    let mut category = StringBuilder::new();
+    let mut type_code = StringBuilder::new();
+    let mut indicator = StringBuilder::new();
+    let mut symbol_root = StringBuilder::new();
+    let mut osi_symbol = StringBuilder::new();
+    let mut bid = Float64Builder::new();
+    let mut ask = Float64Builder::new();
+    let mut bid_size = UInt64Builder::new();
+    let mut ask_size = UInt64Builder::new();
+    let mut price = Float64Builder::new();
+    let mut size = UInt64Builder::new();
+    let mut side = StringBuilder::new();
+    let mut action = StringBuilder::new();
+    let mut flags = UInt64Builder::new();
+
+    for row in rows {
+        packet_index.append_value(row.packet_index);
+        block_sequence.append_value(row.block_sequence);
+        block_timestamp_ns.append_value(row.block_timestamp_ns);
+        message_index_in_block.append_value(row.message_index_in_block);
+        participant.append_value(&row.participant);
+        category.append_value(&row.category);
+        type_code.append_value(&row.type_code);
+        indicator.append_value(&row.indicator);
+
+        if let Some(v) = row.symbol_root.as_ref() {
+            symbol_root.append_value(v);
+        } else {
+            symbol_root.append_null();
+        }
+        if let Some(v) = row.osi_symbol.as_ref() {
+            osi_symbol.append_value(v);
+        } else {
+            osi_symbol.append_null();
+        }
+        if let Some(v) = row.bid {
+            bid.append_value(v);
+        } else {
+            bid.append_null();
+        }
+        if let Some(v) = row.ask {
+            ask.append_value(v);
+        } else {
+            ask.append_null();
+        }
+        if let Some(v) = row.bid_size {
+            bid_size.append_value(v);
+        } else {
+            bid_size.append_null();
+        }
+        if let Some(v) = row.ask_size {
+            ask_size.append_value(v);
+        } else {
+            ask_size.append_null();
+        }
+        if let Some(v) = row.price {
+            price.append_value(v);
+        } else {
+            price.append_null();
+        }
+        if let Some(v) = row.size {
+            size.append_value(v);
+        } else {
+            size.append_null();
+        }
+        if let Some(v) = row.side.as_ref() {
+            side.append_value(v);
+        } else {
+            side.append_null();
+        }
+        if let Some(v) = row.action.as_ref() {
+            action.append_value(v);
+        } else {
+            action.append_null();
+        }
+        if let Some(v) = row.flags {
+            flags.append_value(v);
+        } else {
+            flags.append_null();
+        }
+    }
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(packet_index.finish()),
+            Arc::new(block_sequence.finish()),
+            Arc::new(block_timestamp_ns.finish()),
+            Arc::new(message_index_in_block.finish()),
+            Arc::new(participant.finish()),
+            Arc::new(category.finish()),
+            Arc::new(type_code.finish()),
+            Arc::new(indicator.finish()),
+            Arc::new(symbol_root.finish()),
+            Arc::new(osi_symbol.finish()),
+            Arc::new(bid.finish()),
+            Arc::new(ask.finish()),
+            Arc::new(bid_size.finish()),
+            Arc::new(ask_size.finish()),
+            Arc::new(price.finish()),
+            Arc::new(size.finish()),
+            Arc::new(side.finish()),
+            Arc::new(action.finish()),
+            Arc::new(flags.finish()),
         ],
     )?;
 

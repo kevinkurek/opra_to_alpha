@@ -31,6 +31,9 @@ struct Args {
     /// Dry-run: parse and count messages only
     #[arg(long, default_value_t=false)]
     dry_run: bool,
+    /// Also decode quote/trade-like OPRA message rows and write a trades parquet.
+    #[arg(long, default_value_t=false)]
+    decode_trades: bool,
 }
 
 #[tokio::main()]
@@ -62,6 +65,26 @@ async fn main() -> Result<()> {
     let local_path = local_parquet_output_path(&args.pcap);
     let local_path = arrow_sink::write_parsed_parquet(&local_path, &rows)?;
     info!("wrote {:?} with {} parsed rows", &local_path, rows.len());
+
+    if args.decode_trades {
+        let pcap_bytes = opra_decoder::read_pcap_file(&args.pcap).await?;
+        let parallel = std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(1);
+        let trade_rows = tokio::task::spawn_blocking(move || {
+            opra_decoder::decode_trades_with_parallelism(&pcap_bytes, parallel)
+        })
+        .await
+        .context("trade decode task failed to join")??;
+
+        let trades_path = local_trades_parquet_output_path(&args.pcap);
+        let trades_path = arrow_sink::write_trades_parquet(&trades_path, &trade_rows)?;
+        info!(
+            "wrote {:?} with {} decoded trade rows",
+            &trades_path,
+            trade_rows.len()
+        );
+    }
     Ok(())
 }
 
@@ -72,4 +95,13 @@ fn local_parquet_output_path(pcap_path: &str) -> String {
         .filter(|name| !name.is_empty())
         .unwrap_or("opra");
     format!("./pcap_samples/{}_parsed.parquet", stem)
+}
+
+fn local_trades_parquet_output_path(pcap_path: &str) -> String {
+    let stem = Path::new(pcap_path)
+        .file_stem()
+        .and_then(std::ffi::OsStr::to_str)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("opra");
+    format!("./pcap_samples/{}_trades.parquet", stem)
 }

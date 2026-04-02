@@ -2613,6 +2613,7 @@ dependencies = [
  "bytes",
  "clap",
  "criterion",
+ "hex",
  "opentelemetry",
  "opentelemetry-otlp",
  "parquet",
