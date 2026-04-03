@@ -1,6 +1,8 @@
 use anyhow::{anyhow, Result};
+use chrono::{SecondsFormat, TimeZone, Utc};
 use pcap_parser::{PcapBlock, PcapCapture, Capture};
 use rayon::{prelude::*, ThreadPoolBuilder};
+use std::collections::HashMap;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 
@@ -44,6 +46,7 @@ pub struct DecodedTradeRow {
     pub packet_index: u64,
     pub block_sequence: u64,
     pub block_timestamp_ns: u64,
+    pub block_timestamp_utc: String,
     pub message_index_in_block: u64,
     pub participant: String,
     pub category: String,
@@ -60,6 +63,37 @@ pub struct DecodedTradeRow {
     pub side: Option<String>,
     pub action: Option<String>,
     pub flags: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DecodedMbpRow {
+    pub ts_event: u64,
+    pub ts_recv: u64,
+    pub ts_event_utc: String,
+    pub rtype: u64,
+    pub publisher_id: u64,
+    pub instrument_id: Option<u64>,
+    pub action: Option<String>,
+    pub side: Option<String>,
+    pub price: Option<f64>,
+    pub size: Option<u64>,
+    pub flags: Option<u64>,
+    pub ts_in_delta: i64,
+    pub bid_px_00: Option<f64>,
+    pub ask_px_00: Option<f64>,
+    pub bid_sz_00: Option<u64>,
+    pub ask_sz_00: Option<u64>,
+    pub bid_pb_00: u64,
+    pub ask_pb_00: u64,
+    pub symbol: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct TopBookState {
+    bid_px_00: Option<f64>,
+    ask_px_00: Option<f64>,
+    bid_sz_00: Option<u64>,
+    ask_sz_00: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -178,6 +212,13 @@ pub fn decode_trades_with_parallelism(
 
     rows.sort_unstable_by_key(|row| (row.packet_index, row.message_index_in_block));
     Ok(rows)
+}
+
+/// Decode OPRA quote rows and normalize them into a DataBento-like cmbp-1 shape.
+/// This is derived from quote updates (`q`/`k`) and does not represent raw trade prints.
+pub fn decode_mbp_with_parallelism(buffer: &[u8], parallel: usize) -> Result<Vec<DecodedMbpRow>> {
+    let trade_like_rows = decode_trades_with_parallelism(buffer, parallel)?;
+    Ok(normalize_quotes_to_mbp_rows(&trade_like_rows))
 }
 
 fn decode_legacy_frame(packet_index: usize, frame: &[u8]) -> (DecodeStats, Option<ParsedOpraRow>) {
@@ -400,14 +441,15 @@ fn parse_short_quote_row(
     let (yymmdd, cp) = decode_exp_block(exp);
     let strike = as_price_u16(strike_raw, b'A');
     let osi_symbol = build_osi_symbol(&symbol_root, &yymmdd, cp, strike);
-    let flags = Some(u64::from(read_be_u16_at(body, 15)?));
+    let block_timestamp_ns = u64::from(block.block_ts_sec)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(u64::from(block.block_ts_nsec));
 
     Some(DecodedTradeRow {
         packet_index: u64::try_from(packet_index).unwrap_or(u64::MAX),
         block_sequence: u64::from(block.block_sequence),
-        block_timestamp_ns: u64::from(block.block_ts_sec)
-            .saturating_mul(1_000_000_000)
-            .saturating_add(u64::from(block.block_ts_nsec)),
+        block_timestamp_ns,
+        block_timestamp_utc: format_unix_ns_to_utc(block_timestamp_ns),
         message_index_in_block: u64::try_from(message_index).unwrap_or(u64::MAX),
         participant: char::from(header.participant).to_string(),
         category: char::from(header.category).to_string(),
@@ -424,7 +466,8 @@ fn parse_short_quote_row(
         size: None,
         side: None,
         action: None,
-        flags,
+        // No separate flags byte is decoded yet for short quote body in this parser.
+        flags: None,
     })
 }
 
@@ -453,13 +496,15 @@ fn parse_long_quote_row(
     let (yymmdd, cp) = decode_exp_block(exp);
     let strike = as_price_u32(strike_raw, strike_den);
     let osi_symbol = build_osi_symbol(&symbol_root, &yymmdd, cp, strike);
+    let block_timestamp_ns = u64::from(block.block_ts_sec)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(u64::from(block.block_ts_nsec));
 
     Some(DecodedTradeRow {
         packet_index: u64::try_from(packet_index).unwrap_or(u64::MAX),
         block_sequence: u64::from(block.block_sequence),
-        block_timestamp_ns: u64::from(block.block_ts_sec)
-            .saturating_mul(1_000_000_000)
-            .saturating_add(u64::from(block.block_ts_nsec)),
+        block_timestamp_ns,
+        block_timestamp_utc: format_unix_ns_to_utc(block_timestamp_ns),
         message_index_in_block: u64::try_from(message_index).unwrap_or(u64::MAX),
         participant: char::from(header.participant).to_string(),
         category: char::from(header.category).to_string(),
@@ -521,7 +566,7 @@ fn build_osi_symbol(root: &str, yymmdd: &str, cp: char, strike: f64) -> String {
     } else {
         0
     };
-    format!("{root} {yymmdd}{cp}{strike_int:08}")
+    format!("{root}   {yymmdd}{cp}{strike_int:08}")
 }
 
 fn as_price_u16(raw: u16, den_code: u8) -> f64 {
@@ -550,6 +595,94 @@ fn as_price_u32(raw: u32, den_code: u8) -> f64 {
         return f64::from(raw);
     }
     f64::from(raw) / 10_f64.powi(i32::try_from(den).unwrap_or(0))
+}
+
+fn format_unix_ns_to_utc(timestamp_ns: u64) -> String {
+    let secs = i64::try_from(timestamp_ns / 1_000_000_000).unwrap_or(i64::MAX);
+    let nanos = u32::try_from(timestamp_ns % 1_000_000_000).unwrap_or(0);
+    if let Some(dt) = Utc.timestamp_opt(secs, nanos).single() {
+        dt.to_rfc3339_opts(SecondsFormat::Nanos, true)
+    } else {
+        String::new()
+    }
+}
+
+fn normalize_quotes_to_mbp_rows(rows: &[DecodedTradeRow]) -> Vec<DecodedMbpRow> {
+    let mut out = Vec::new();
+    let mut state_by_symbol: HashMap<String, TopBookState> = HashMap::new();
+
+    for row in rows {
+        let symbol = row.osi_symbol.clone().or_else(|| row.symbol_root.clone());
+        let Some(symbol_key) = symbol.clone() else {
+            continue;
+        };
+
+        let state = state_by_symbol.entry(symbol_key).or_default();
+
+        // Determine which side changed to produce DataBento-like action/side/price/size values.
+        let bid_changed = row.bid != state.bid_px_00 || row.bid_size != state.bid_sz_00;
+        let ask_changed = row.ask != state.ask_px_00 || row.ask_size != state.ask_sz_00;
+        let (side, price, size, action) = if ask_changed {
+            (
+                Some(String::from("A")),
+                row.ask,
+                row.ask_size,
+                derive_action(state.ask_sz_00, row.ask_size),
+            )
+        } else if bid_changed {
+            (
+                Some(String::from("B")),
+                row.bid,
+                row.bid_size,
+                derive_action(state.bid_sz_00, row.bid_size),
+            )
+        } else {
+            (None, None, None, None)
+        };
+
+        state.bid_px_00 = row.bid;
+        state.ask_px_00 = row.ask;
+        state.bid_sz_00 = row.bid_size;
+        state.ask_sz_00 = row.ask_size;
+
+        out.push(DecodedMbpRow {
+            ts_event: row.block_timestamp_ns,
+            ts_recv: row.block_timestamp_ns,
+            ts_event_utc: row.block_timestamp_utc.clone(),
+            // DataBento rtype for cmbp-1 rows shown in notebook samples.
+            rtype: 177,
+            // Keep publisher ID stable for OPRA in this local normalization path.
+            publisher_id: 30,
+            instrument_id: None,
+            action,
+            side,
+            price,
+            size,
+            flags: row.flags,
+            ts_in_delta: 0,
+            bid_px_00: row.bid,
+            ask_px_00: row.ask,
+            bid_sz_00: row.bid_size,
+            ask_sz_00: row.ask_size,
+            bid_pb_00: 0,
+            ask_pb_00: 0,
+            symbol,
+        });
+    }
+
+    out
+}
+
+fn derive_action(previous_size: Option<u64>, current_size: Option<u64>) -> Option<String> {
+    if previous_size == current_size {
+        return None;
+    }
+    match (previous_size.unwrap_or(0), current_size.unwrap_or(0)) {
+        (0, 0) => None,
+        (0, _) => Some(String::from("A")),
+        (_, 0) => Some(String::from("D")),
+        _ => Some(String::from("C")),
+    }
 }
 
 #[must_use]
@@ -598,5 +731,19 @@ mod tests {
     fn price_denominator_conversion() {
         assert!((as_price_u16(423, b'B') - 4.23).abs() < 1e-9);
         assert!((as_price_u32(123456, b'A') - 12345.6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn formats_block_timestamp_to_utc() {
+        let ts = format_unix_ns_to_utc(1_692_714_600_005_955_584);
+        assert_eq!(ts, "2023-08-22T14:30:00.005955584Z");
+    }
+
+    #[test]
+    fn derives_action_from_size_transitions() {
+        assert_eq!(derive_action(Some(0), Some(10)).as_deref(), Some("A"));
+        assert_eq!(derive_action(Some(10), Some(20)).as_deref(), Some("C"));
+        assert_eq!(derive_action(Some(10), Some(0)).as_deref(), Some("D"));
+        assert_eq!(derive_action(Some(10), Some(10)), None);
     }
 }

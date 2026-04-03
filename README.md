@@ -80,6 +80,49 @@ tshark -r ny4-opra-new-a-20230822T143000.pcap -c 1 -T json > example_packets.jso
 | **Length** | `154` | Total frame size (bytes on wire, including headers). |
 | **Info** | `45040 → 45040 Len=108` | UDP layer summary: source port, destination port, and payload size. |
 
+### Example Trade Parquet Schema (`*_trades.parquet`)
+
+```bash
+# decode block rows + trade/quote-like rows into local parquet
+cd rust-ingest
+cargo run --release -- --pcap ./pcap_samples/ny4-small-10k.pcap --decode-trades
+
+# inspect resulting trade parquet in Python
+python - <<'PY'
+import pandas as pd
+df = pd.read_parquet("./pcap_samples/ny4-small-10k_trades.parquet")
+print(df.head(5))
+PY
+```
+
+Current v1 output columns:
+
+| **Column** | **How it is parsed** | **Meaning** |
+|-------------|----------------------|-------------|
+| `packet_index` | Index from `par_iter().enumerate()` | Packet position in the PCAP file. |
+| `block_sequence` | OPRA block header bytes `6..10` (big-endian) | Sequence number of the OPRA transmission block. |
+| `block_timestamp_ns` | OPRA block header sec+nsec bytes `11..19` | Block event time in nanoseconds since epoch. |
+| `message_index_in_block` | Message loop index within block | Position of message inside the block. |
+| `participant` | Message header byte `0` | Participant ID from OPRA message header. |
+| `category` | Message header byte `1` | OPRA message category (v1 decodes `q` and `k`). |
+| `type_code` | Message header byte `2` | Message type code from OPRA header. |
+| `indicator` | Message header byte `3` | Message indicator from OPRA header. |
+| `symbol_root` | Body bytes (`q`: `0..4`, `k`: `0..5`) | Root option symbol string. |
+| `osi_symbol` | Derived from root + exp block + strike | Normalized OSI-like symbol string. |
+| `bid`, `ask` | Body numeric fields with OPRA denominator rules | Decoded quote prices. |
+| `bid_size`, `ask_size` | Body size fields | Quote sizes. |
+| `price`, `size`, `side`, `action` | Reserved nullable fields in v1 | Placeholders for true trade-print decoding. |
+| `flags` | Currently from last short-quote body field | Extra condition/flag value for analysis. |
+
+How it is decoded:
+1. Ethernet/VLAN/IPv4/UDP headers are stripped to isolate UDP payload.
+2. OPRA block header is parsed (`block_size`, `messages_in_block`, sequence, timestamp).
+3. Block body is split into fixed-size messages for that block.
+4. OPRA 12-byte message header is parsed per message.
+5. For categories `q` and `k`, quote fields are decoded and written to `*_trades.parquet`.
+
+Note: This v1 "trade" parquet is quote/trade-like research output (categories `q`/`k`). Full OPRA trade-print message family decoding can be layered on top of this structure.
+
 ---
 
 ## PCAP Structure Overview

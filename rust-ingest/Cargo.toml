@@ -22,6 +22,7 @@ bytemuck = { version = "1", features = ["derive"] }
 aws-config = "1"
 aws-sdk-s3 = "1"
 rayon = "1.5"
+chrono = "0.4"
 
 [dev-dependencies]
 criterion = "0.5"
