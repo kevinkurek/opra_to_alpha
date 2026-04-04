@@ -80,6 +80,83 @@ tshark -r ny4-opra-new-a-20230822T143000.pcap -c 1 -T json > example_packets.jso
 | **Length** | `154` | Total frame size (bytes on wire, including headers). |
 | **Info** | `45040 → 45040 Len=108` | UDP layer summary: source port, destination port, and payload size. |
 
+---
+
+### OPRA Spec Primer
+
+This parser is based on OPRA Pillar binary transmission structure:
+
+- Transmission Block:
+  - Block Header: `21` bytes
+  - Block Data: one or more OPRA messages
+  - Optional pad byte (`0x00`) when needed for even block length
+- Message:
+  - Message Header: `12` bytes
+  - Message Body: format depends on `category + type + indicator`
+
+Current OPRA references:
+
+- OPRA Pillar Output Specification (Dec 6, 2024): <https://cdn.opraplan.com/documents/OPRA_Pillar_Output_Specification.pdf>
+- OPRA Pillar Input Specification (Jul 25, 2024): <https://cdn.opraplan.com/documents/OPRA_Pillar_Input_Specification.pdf>
+
+#### Block Header Layout (21 bytes)
+
+| **Offset** | **Length** | **Field** |
+|------------|------------|-----------|
+| `0` | `1` | Version |
+| `1..3` | `2` | Block Size (big-endian) |
+| `3` | `1` | Data Feed Indicator (`'O'`) |
+| `4` | `1` | Retransmission Indicator |
+| `5` | `1` | Session Indicator |
+| `6..10` | `4` | Block Sequence Number |
+| `10` | `1` | Messages In Block |
+| `11..19` | `8` | Block Timestamp (`sec` + `nsec`) |
+| `19..21` | `2` | Block Checksum |
+
+#### Message Header Layout (12 bytes)
+
+| **Offset** | **Length** | **Field** |
+|------------|------------|-----------|
+| `0` | `1` | Participant ID |
+| `1` | `1` | Message Category |
+| `2` | `1` | Message Type |
+| `3` | `1` | Message Indicator |
+| `4..8` | `4` | Transaction ID |
+| `8..12` | `4` | Participant Reference Number |
+
+#### Byte Example
+
+From a real OPRA payload prefix used in tests:
+
+```text
+06 00 6c 4f 20 00 15 30 b0 03 03 64 e4 c6 67 3b 97 bf 00 1e ...
+```
+
+Decoded:
+
+- `block_size` = `0x006c` = `108`
+- feed indicator = `0x4f` = `'O'`
+- `messages_in_block` = `0x03` = `3`
+- `block_sequence` = `0x1530b003` = `355512323`
+- timestamp bytes split into seconds + nanoseconds
+
+#### What Our Code Does Today
+
+1. Strip Ethernet/VLAN/IPv4/UDP and isolate UDP payload.
+2. Parse OPRA block header.
+3. Split block data into fixed-size messages for that block.
+4. Parse 12-byte message header.
+5. Decode `q` and `k` quote-family rows into `DecodedTradeRow`.
+
+#### What “Production-Like” Still Requires
+
+- Full dispatch by `category + type + indicator` across OPRA message families (not just `q/k`)
+- Exact appendage handling (none/single/double) where spec requires it
+- Full trade-print family parsing to populate true trade fields (`price/size/conditions/...`)
+- Category-specific handling for variable-length administrative/control messages
+
+---
+
 ### Example Trade Parquet Schema (`*_trades.parquet`)
 
 ```bash
@@ -112,16 +189,61 @@ Current v1 output columns:
 | `bid`, `ask` | Body numeric fields with OPRA denominator rules | Decoded quote prices. |
 | `bid_size`, `ask_size` | Body size fields | Quote sizes. |
 | `price`, `size`, `side`, `action` | Reserved nullable fields in v1 | Placeholders for true trade-print decoding. |
-| `flags` | Currently from last short-quote body field | Extra condition/flag value for analysis. |
+| `flags` | Nullable in current `q`/`k` parser | Reserved for condition/flags when mapped for a message family. |
 
 How it is decoded:
-1. Ethernet/VLAN/IPv4/UDP headers are stripped to isolate UDP payload.
-2. OPRA block header is parsed (`block_size`, `messages_in_block`, sequence, timestamp).
-3. Block body is split into fixed-size messages for that block.
-4. OPRA 12-byte message header is parsed per message.
-5. For categories `q` and `k`, quote fields are decoded and written to `*_trades.parquet`.
+1. Ethernet/VLAN/IPv4/UDP headers are stripped to isolate UDP payload (`decode_trades_with_parallelism` -> `decode_trade_rows_from_frame` -> `extract_udp_payload`).
+2. OPRA block header is parsed (`block_size`, `messages_in_block`, sequence, timestamp) (`parse_block_header`).
+3. Block body is split into fixed-size messages for that block (`decode_trade_rows_from_frame` message slicing loop).
+4. OPRA 12-byte message header is parsed per message (`parse_message_header`).
+5. For categories `q` and `k`, quote fields are decoded and written to `*_trades.parquet` (`parse_short_quote_row` / `parse_long_quote_row` -> `write_trades_parquet`).
 
-Note: This v1 "trade" parquet is quote/trade-like research output (categories `q`/`k`). Full OPRA trade-print message family decoding can be layered on top of this structure.
+#### Concrete decode example (single packet -> one parquet row)
+
+Example OPRA UDP payload prefix (hex, from a parser test fixture):
+
+```text
+06 00 6c 4f 20 00 15 30 b0 03 03 64 e4 c6 67 3b 97 bf 00 1e ...
+```
+
+1. Strip transport wrappers:
+`extract_udp_payload()` walks the frame as:
+Ethernet (14 bytes) -> optional VLAN (+4) -> IPv4 (`ihl * 4`) -> UDP (8 bytes) -> payload slice.
+Only frames with IPv4 + UDP are kept.
+Function path: `decode_trades_with_parallelism` -> `decode_trade_rows_from_frame` -> `extract_udp_payload`.
+
+2. Parse OPRA block header (first 21 bytes of UDP payload):
+- `block_size` = bytes `[1..3]` = `0x006c` = `108`
+- feed indicator = byte `[3]` = `0x4f` = `'O'`
+- `messages_in_block` = byte `[10]` = `0x03` = `3`
+- `block_sequence` = bytes `[6..10]` = `0x1530b003` = `355512323`
+- timestamp = sec bytes `[11..15]` + nsec bytes `[15..19]`
+Function path: `parse_block_header`.
+
+3. Parse block body:
+- Body starts at byte `21`
+- Body ends at byte `block_size` (`108`)
+- Body length is `108 - 21 = 87`
+- With `messages_in_block = 3`, each message is `87 / 3 = 29` bytes
+Function path: `decode_trade_rows_from_frame` (computes `msg_len`, then slices each message).
+
+4. Parse OPRA message header (first 12 bytes of each message):
+- byte `0`: `participant`
+- byte `1`: `category`
+- byte `2`: `type_code`
+- byte `3`: `indicator`
+- bytes `4..12`: transaction/reference fields (kept for routing, not all emitted yet)
+Function path: `parse_message_header`.
+
+5. Parse category-specific body (`q` and `k` currently):
+- If `category == 'q'` (29-byte message): parse short quote body fields
+  (`symbol_root`, expiration block, strike, bid/ask, sizes)
+- If `category == 'k'` (43-byte message): parse long quote body fields
+- Build `osi_symbol` from root + expiration + call/put + strike
+- Emit one parquet row with block/message metadata plus decoded quote columns
+Function path: `parse_short_quote_row` / `parse_long_quote_row` -> return `DecodedTradeRow` -> `arrow_sink::write_trades_parquet`.
+
+Note: current `*_trades.parquet` is quote-focused (`q`/`k`) research output. It is intentionally not full OPRA trade-print coverage yet.
 
 ---
 

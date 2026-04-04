@@ -34,9 +34,6 @@ struct Args {
     /// Also decode quote/trade-like OPRA message rows and write a trades parquet.
     #[arg(long, default_value_t=false)]
     decode_trades: bool,
-    /// Decode quote rows into a DataBento-like cmbp-1 shape and write an MBP parquet.
-    #[arg(long, default_value_t=false)]
-    decode_mbp: bool,
 }
 
 #[tokio::main()]
@@ -89,21 +86,6 @@ async fn main() -> Result<()> {
         );
     }
 
-    if args.decode_mbp {
-        let pcap_bytes = opra_decoder::read_pcap_file(&args.pcap).await?;
-        let parallel = std::thread::available_parallelism()
-            .map(std::num::NonZeroUsize::get)
-            .unwrap_or(1);
-        let mbp_rows = tokio::task::spawn_blocking(move || {
-            opra_decoder::decode_mbp_with_parallelism(&pcap_bytes, parallel)
-        })
-        .await
-        .context("mbp decode task failed to join")??;
-
-        let mbp_path = local_mbp_parquet_output_path(&args.pcap);
-        let mbp_path = arrow_sink::write_mbp_parquet(&mbp_path, &mbp_rows)?;
-        info!("wrote {:?} with {} decoded mbp rows", &mbp_path, mbp_rows.len());
-    }
     Ok(())
 }
 
@@ -123,13 +105,4 @@ fn local_trades_parquet_output_path(pcap_path: &str) -> String {
         .filter(|name| !name.is_empty())
         .unwrap_or("opra");
     format!("./pcap_samples/{}_trades.parquet", stem)
-}
-
-fn local_mbp_parquet_output_path(pcap_path: &str) -> String {
-    let stem = Path::new(pcap_path)
-        .file_stem()
-        .and_then(std::ffi::OsStr::to_str)
-        .filter(|name| !name.is_empty())
-        .unwrap_or("opra");
-    format!("./pcap_samples/{}_mbp.parquet", stem)
 }

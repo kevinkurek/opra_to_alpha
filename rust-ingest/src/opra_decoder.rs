@@ -2,7 +2,6 @@ use anyhow::{anyhow, Result};
 use chrono::{SecondsFormat, TimeZone, Utc};
 use pcap_parser::{PcapBlock, PcapCapture, Capture};
 use rayon::{prelude::*, ThreadPoolBuilder};
-use std::collections::HashMap;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 
@@ -63,37 +62,6 @@ pub struct DecodedTradeRow {
     pub side: Option<String>,
     pub action: Option<String>,
     pub flags: Option<u64>,
-}
-
-#[derive(Debug, Clone)]
-pub struct DecodedMbpRow {
-    pub ts_event: u64,
-    pub ts_recv: u64,
-    pub ts_event_utc: String,
-    pub rtype: u64,
-    pub publisher_id: u64,
-    pub instrument_id: Option<u64>,
-    pub action: Option<String>,
-    pub side: Option<String>,
-    pub price: Option<f64>,
-    pub size: Option<u64>,
-    pub flags: Option<u64>,
-    pub ts_in_delta: i64,
-    pub bid_px_00: Option<f64>,
-    pub ask_px_00: Option<f64>,
-    pub bid_sz_00: Option<u64>,
-    pub ask_sz_00: Option<u64>,
-    pub bid_pb_00: u64,
-    pub ask_pb_00: u64,
-    pub symbol: Option<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct TopBookState {
-    bid_px_00: Option<f64>,
-    ask_px_00: Option<f64>,
-    bid_sz_00: Option<u64>,
-    ask_sz_00: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -212,13 +180,6 @@ pub fn decode_trades_with_parallelism(
 
     rows.sort_unstable_by_key(|row| (row.packet_index, row.message_index_in_block));
     Ok(rows)
-}
-
-/// Decode OPRA quote rows and normalize them into a DataBento-like cmbp-1 shape.
-/// This is derived from quote updates (`q`/`k`) and does not represent raw trade prints.
-pub fn decode_mbp_with_parallelism(buffer: &[u8], parallel: usize) -> Result<Vec<DecodedMbpRow>> {
-    let trade_like_rows = decode_trades_with_parallelism(buffer, parallel)?;
-    Ok(normalize_quotes_to_mbp_rows(&trade_like_rows))
 }
 
 fn decode_legacy_frame(packet_index: usize, frame: &[u8]) -> (DecodeStats, Option<ParsedOpraRow>) {
@@ -607,84 +568,6 @@ fn format_unix_ns_to_utc(timestamp_ns: u64) -> String {
     }
 }
 
-fn normalize_quotes_to_mbp_rows(rows: &[DecodedTradeRow]) -> Vec<DecodedMbpRow> {
-    let mut out = Vec::new();
-    let mut state_by_symbol: HashMap<String, TopBookState> = HashMap::new();
-
-    for row in rows {
-        let symbol = row.osi_symbol.clone().or_else(|| row.symbol_root.clone());
-        let Some(symbol_key) = symbol.clone() else {
-            continue;
-        };
-
-        let state = state_by_symbol.entry(symbol_key).or_default();
-
-        // Determine which side changed to produce DataBento-like action/side/price/size values.
-        let bid_changed = row.bid != state.bid_px_00 || row.bid_size != state.bid_sz_00;
-        let ask_changed = row.ask != state.ask_px_00 || row.ask_size != state.ask_sz_00;
-        let (side, price, size, action) = if ask_changed {
-            (
-                Some(String::from("A")),
-                row.ask,
-                row.ask_size,
-                derive_action(state.ask_sz_00, row.ask_size),
-            )
-        } else if bid_changed {
-            (
-                Some(String::from("B")),
-                row.bid,
-                row.bid_size,
-                derive_action(state.bid_sz_00, row.bid_size),
-            )
-        } else {
-            (None, None, None, None)
-        };
-
-        state.bid_px_00 = row.bid;
-        state.ask_px_00 = row.ask;
-        state.bid_sz_00 = row.bid_size;
-        state.ask_sz_00 = row.ask_size;
-
-        out.push(DecodedMbpRow {
-            ts_event: row.block_timestamp_ns,
-            ts_recv: row.block_timestamp_ns,
-            ts_event_utc: row.block_timestamp_utc.clone(),
-            // DataBento rtype for cmbp-1 rows shown in notebook samples.
-            rtype: 177,
-            // Keep publisher ID stable for OPRA in this local normalization path.
-            publisher_id: 30,
-            instrument_id: None,
-            action,
-            side,
-            price,
-            size,
-            flags: row.flags,
-            ts_in_delta: 0,
-            bid_px_00: row.bid,
-            ask_px_00: row.ask,
-            bid_sz_00: row.bid_size,
-            ask_sz_00: row.ask_size,
-            bid_pb_00: 0,
-            ask_pb_00: 0,
-            symbol,
-        });
-    }
-
-    out
-}
-
-fn derive_action(previous_size: Option<u64>, current_size: Option<u64>) -> Option<String> {
-    if previous_size == current_size {
-        return None;
-    }
-    match (previous_size.unwrap_or(0), current_size.unwrap_or(0)) {
-        (0, 0) => None,
-        (0, _) => Some(String::from("A")),
-        (_, 0) => Some(String::from("D")),
-        _ => Some(String::from("C")),
-    }
-}
-
 #[must_use]
 fn read_u8_at(data: &[u8], offset: usize) -> Option<u8> {
     data.get(offset).copied()
@@ -739,11 +622,4 @@ mod tests {
         assert_eq!(ts, "2023-08-22T14:30:00.005955584Z");
     }
 
-    #[test]
-    fn derives_action_from_size_transitions() {
-        assert_eq!(derive_action(Some(0), Some(10)).as_deref(), Some("A"));
-        assert_eq!(derive_action(Some(10), Some(20)).as_deref(), Some("C"));
-        assert_eq!(derive_action(Some(10), Some(0)).as_deref(), Some("D"));
-        assert_eq!(derive_action(Some(10), Some(10)), None);
-    }
 }
