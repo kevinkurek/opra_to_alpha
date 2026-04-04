@@ -1,25 +1,65 @@
-# 🧊 Trino + Iceberg + Postgres + MinIO + Airflow + Superset
+# 🦀 Rust OPRA PCAP Ingestion & Decoding Pipeline
+### 🧊 Trino + Iceberg + Postgres + MinIO + Airflow + Superset
 
-A full local **lakehouse stack** for data ingestion, query federation, and orchestration—integrating Trino, Apache Iceberg, MinIO (S3-compatible object store), Postgres (metadata + Airflow DB), and Apache Airflow.  
-Rust-based OPRA PCAP ingestion is also included for feed replay into MinIO.
-
-![](datalake.jpg)
+Rust-based OPRA PCAP ingestion.
+A full local **lakehouse stack** for data ingestion, query federation, and orchestration—integrating Trino, Apache Iceberg, MinIO (S3-compatible object store), Postgres (metadata + Airflow DB), and Apache Airflow.
 
 ---
 
-## Rough tree structure (with depth excluded for clarity)
+```bash
+# run the rust ingest binary on a sample pcap
+cd rust-ingest
+cargo run --release -- --pcap ./pcap_samples/ny4-small-10k.pcap --decode-trades
+>>
+  # Output 2 schemas:
+  1. wrote parsed parquet to "./pcap_samples/ny4-small-10k_parsed.parquet" with 10000 rows
+  2. wrote "./pcap_samples/ny4-small-10k_trades.parquet" with 14440 decoded trade rows
+
+  parsed schema (`*_parsed.parquet`):
+  - packet_index: UInt64 NOT NULL
+  - udp_payload_len: UInt64 NOT NULL
+  - block_size: UInt64 NOT NULL
+  - messages_in_block: UInt64 NOT NULL
+
+  trades schema (`*_trades.parquet`):
+  - packet_index: UInt64 NOT NULL
+  - block_sequence: UInt64 NOT NULL
+  - block_timestamp_ns: UInt64 NOT NULL
+  - block_timestamp_utc: Utf8 NOT NULL
+  - message_index_in_block: UInt64 NOT NULL
+  - participant: Utf8 NOT NULL
+  - category: Utf8 NOT NULL
+  - type_code: Utf8 NOT NULL
+  - indicator: Utf8 NOT NULL
+  - symbol_root: Utf8 NULL
+  - osi_symbol: Utf8 NULL
+  - bid: Float64 NULL
+  - ask: Float64 NULL
+  - bid_size: UInt64 NULL
+  - ask_size: UInt64 NULL
+  - price: Float64 NULL
+  - size: UInt64 NULL
+  - side: Utf8 NULL
+  - action: Utf8 NULL
+  - flags: UInt64 NULL
+```
+
+
+---
+
+## Project structure
 ```bash
 tree -L 4 -I 'node_modules|__pycache__|logs|plugins|superset|debug|release' -P '*.yaml|*.properties|*.yml|*.rs|*.xml|*.pcap'
 >>
 ├── airflow-docker
 │   ├── config
 │   ├── dags
-│   └── docker-compose.yaml # sets up airflow
+│   └── docker-compose.yaml         # sets up airflow
 ├── superset
 │   └── docker-compose-non-dev.yaml # sets up superset
 ├── research
 │   └── environment.yml
-├── rust-ingest
+├── rust-ingest                     # actual PCAP ingestion & parsing
 │   ├── pcap_samples
 │   │   └── ny4-opra-new-a-20230822T143000.pcap
 │   ├── src
@@ -29,7 +69,7 @@ tree -L 4 -I 'node_modules|__pycache__|logs|plugins|superset|debug|release' -P '
 │   │   └── telemetry.rs
 │   └── target
 └── trino
-    ├── docker-compose.yaml # sets up trino, minio, hive-metastore, hive-postgres db
+    ├── docker-compose.yaml         # sets up trino, minio, hive-metastore, hive-postgres db
     ├── etc
     │   ├── catalog
     │   │   ├── hive.properties
@@ -96,8 +136,8 @@ This parser is based on OPRA Pillar binary transmission structure:
 
 Current OPRA references:
 
-- OPRA Pillar Output Specification (Dec 6, 2024): <https://cdn.opraplan.com/documents/OPRA_Pillar_Output_Specification.pdf>
-- OPRA Pillar Input Specification (Jul 25, 2024): <https://cdn.opraplan.com/documents/OPRA_Pillar_Input_Specification.pdf>
+- OPRA Pillar Output Specification (Feb 20, 2026): <https://cdn.opraplan.com/documents/OPRA_Pillar_Output_Specification.pdf>
+- OPRA Pillar Input Specification (Feb 20, 2026): <https://cdn.opraplan.com/documents/OPRA_Pillar_Input_Specification.pdf>
 
 #### Block Header Layout (21 bytes)
 
@@ -124,21 +164,193 @@ Current OPRA references:
 | `4..8` | `4` | Transaction ID |
 | `8..12` | `4` | Participant Reference Number |
 
-#### Byte Example
+#### OPRA PCAP Decoding Example
 
-From a real OPRA payload prefix used in tests:
+When decoding an OPRA PCAP, it helps to think in layers rather than assuming one packet equals one quote. An Ethernet frame contains an IP packet, the IP packet contains a UDP datagram, the UDP payload contains an OPRA block, and that OPRA block contains one or more OPRA messages. The OPRA block starts with a single block header that applies to the whole block. After that, each individual OPRA message has its own message header followed by its own body. So yes, there can be multiple message headers inside one block, because a single block may carry multiple OPRA messages.
+
+The block header is the outer framing for the OPRA payload. It tells you things like ordering, timing, and how many messages you should expect to parse from this block. The message header is different: it applies only to one message and tells you what that message is, such as a long quote (`k`), short quote (`q`), trade, and so on. In practice, your parser reads the block header once, then loops over the message count, reading one message header and one message body at a time.
+
+A useful mental model is:
 
 ```text
-06 00 6c 4f 20 00 15 30 b0 03 03 64 e4 c6 67 3b 97 bf 00 1e ...
+UDP payload
+└── OPRA block
+    ├── block header
+    ├── message header #1
+    ├── message body #1
+    ├── message header #2
+    ├── message body #2
+    └── ...
 ```
 
-Decoded:
+Here is a synthetic but realistic raw byte example for a single OPRA block carrying one `k` quote message:
 
-- `block_size` = `0x006c` = `108`
-- feed indicator = `0x4f` = `'O'`
-- `messages_in_block` = `0x03` = `3`
-- `block_sequence` = `0x1530b003` = `355512323`
-- timestamp bytes split into seconds + nanoseconds
+```text
+00 2B 01 00 00 00 00 10 01 00 00 00 5F 37 59 DF 00 00 00 00 00 # 21 byte OPRA block header
+43 6B 20 41 00 BC 61 4E 00 00 00 00                            # 12 byte OPRA message header
+53 50 59 20 20 00 57 11 17 42 00 07 6A 50 42                   # OPRA `k` message body
+00 00 00 9D 00 00 00 19 00 00 00 A0 00 00 00 12                # OPRA `k` message body continuation
+```
+
+The first 21 bytes are the OPRA block header:
+
+```text
+00 2B                    -> block size
+01                       -> feed indicator
+00                       -> retransmission indicator
+00                       -> session indicator
+00 00 00 10              -> block sequence number
+01                       -> message count
+00 00 00 5F 37 59 DF     -> block timestamp
+00 00 00 00              -> checksum
+00                       -> reserved
+```
+
+That decodes conceptually to something like:
+
+```json
+{
+  "block_size": 43,
+  "block_sequence": 16,
+  "message_count": 1,
+  "timestamp_raw": 1597463007
+}
+```
+
+Immediately after the block header comes the 12-byte OPRA message header:
+
+```text
+43                       -> participant id = 'C'
+6B                       -> message category = 'k'
+20                       -> message type = ' '
+41                       -> message indicator = 'A'
+00 BC 61 4E              -> transaction id = 12345678
+00 00 00 00              -> participant reference number = 0
+```
+
+That decodes to:
+
+```json
+{
+  "participant_id": "C",
+  "message_category": "k",
+  "message_type": " ",
+  "message_indicator": "A",
+  "transaction_id": 12345678,
+  "participant_reference_number": 0
+}
+```
+
+The remaining bytes are the `k` message body:
+
+```text
+53 50 59 20 20           -> security symbol = "SPY  "
+00                       -> reserved
+57                       -> expiration month code = 'W'
+11                       -> expiration day = 17
+17                       -> expiration year offset = 23
+42                       -> strike denominator code = 'B'
+00 07 6A 50              -> strike price raw = 486000
+42                       -> premium price denominator code = 'B'
+00 00 00 9D              -> bid price raw = 157
+00 00 00 19              -> bid size raw = 25
+00 00 00 A0              -> ask price raw = 160
+00 00 00 12              -> ask size raw = 18
+```
+
+Now decode the business meaning of those fields. The symbol is `SPY`. The month code `W` means a November put. The day is `17`. The year byte is stored as an offset from 2000, so `23` means `2023`. The strike denominator code `B` means divide the raw strike integer by 100, so `486000` becomes `4860.00`. The premium denominator code `B` also means divide by 100, so the bid raw value `157` becomes `1.57` and the ask raw value `160` becomes `1.60`. The sizes remain integer contract sizes.
+
+So the fully decoded quote becomes:
+
+```json
+{
+  "participant_id": "C",
+  "message_category": "k",
+  "message_type": " ",
+  "message_indicator": "A",
+  "transaction_id": 12345678,
+  "participant_reference_number": 0,
+  "security_symbol": "SPY",
+  "expiration_date": "2023-11-17",
+  "option_side": "put",
+  "strike_price": 4860.00,
+  "bid_price": 1.57,
+  "bid_size": 25,
+  "ask_price": 1.60,
+  "ask_size": 18
+}
+```
+
+A Rust-oriented mental model for this same message is:
+
+```rust
+struct OpraBlockHeader {
+    block_size: u16,
+    feed_indicator: u8,
+    retransmission_indicator: u8,
+    session_indicator: u8,
+    block_sequence_number: u32,
+    message_count: u8,
+    block_timestamp: u64,
+    checksum: u32,
+    reserved: u8,
+}
+
+struct OpraMessageHeader {
+    participant_id: u8,
+    message_category: u8,
+    message_type: u8,
+    message_indicator: u8,
+    transaction_id: u32,
+    participant_reference_number: u32,
+}
+
+struct KQuoteBody {
+    security_symbol: [u8; 5],
+    reserved: u8,
+    expiration_month_code: u8,
+    expiration_day: u8,
+    expiration_year_offset: u8,
+    strike_price_denominator_code: u8,
+    strike_price_raw: u32,
+    premium_price_denominator_code: u8,
+    bid_price_raw: u32,
+    bid_size_raw: u32,
+    ask_price_raw: u32,
+    ask_size_raw: u32,
+}
+```
+
+A simple parsing flow in Rust looks like this:
+
+```rust
+fn parse_opra_block(input: &[u8]) {
+    let (rest, block_header) = parse_block_header(input).unwrap();
+
+    let mut cursor = rest;
+    for _ in 0..block_header.message_count {
+        let (rest_after_header, msg_header) = parse_message_header(cursor).unwrap();
+
+        cursor = match msg_header.message_category {
+            b'k' => {
+                let (rest_after_body, body) = parse_k_quote(rest_after_header).unwrap();
+                println!("{msg_header:?} {body:?}");
+                rest_after_body
+            }
+            b'q' => {
+                let (rest_after_body, body) = parse_q_quote(rest_after_header).unwrap();
+                println!("{msg_header:?} {body:?}");
+                rest_after_body
+            }
+            _ => {
+                panic!("unsupported message category: {}", msg_header.message_category as char);
+            }
+        };
+    }
+}
+```
+
+The key takeaway is that the block header is the outer container for a batch of messages, the message header determines how to interpret each individual message, and the actual market data lives in the message body.
 
 #### What Our Code Does Today
 
@@ -159,7 +371,7 @@ Current decoder architecture in code:
 This gives us a production-style extension point: add a new family parser and wire it in
 `decode_message_by_spec` without changing the rest of the pipeline.
 
-#### What “Production-Like” Still Requires
+#### What “Production” Still Requires
 
 - Full dispatch by `category + type + indicator` across OPRA message families (not just `q/k`)
 - Exact appendage handling (none/single/double) where spec requires it
@@ -208,51 +420,6 @@ How it is decoded:
 3. Block body is split into fixed-size messages for that block (`decode_trade_rows_from_frame` message slicing loop).
 4. OPRA 12-byte message header is parsed per message (`parse_message_header`).
 5. For categories `q` and `k`, quote fields are decoded and written to `*_trades.parquet` (`parse_short_quote_row` / `parse_long_quote_row` -> `write_trades_parquet`).
-
-#### Concrete decode example (single packet -> one parquet row)
-
-Example OPRA UDP payload prefix (hex, from a parser test fixture):
-
-```text
-06 00 6c 4f 20 00 15 30 b0 03 03 64 e4 c6 67 3b 97 bf 00 1e ...
-```
-
-1. Strip transport wrappers:
-`extract_udp_payload()` walks the frame as:
-Ethernet (14 bytes) -> optional VLAN (+4) -> IPv4 (`ihl * 4`) -> UDP (8 bytes) -> payload slice.
-Only frames with IPv4 + UDP are kept.
-Function path: `decode_trades_with_parallelism` -> `decode_trade_rows_from_frame` -> `extract_udp_payload`.
-
-2. Parse OPRA block header (first 21 bytes of UDP payload):
-- `block_size` = bytes `[1..3]` = `0x006c` = `108`
-- feed indicator = byte `[3]` = `0x4f` = `'O'`
-- `messages_in_block` = byte `[10]` = `0x03` = `3`
-- `block_sequence` = bytes `[6..10]` = `0x1530b003` = `355512323`
-- timestamp = sec bytes `[11..15]` + nsec bytes `[15..19]`
-Function path: `parse_block_header`.
-
-3. Parse block body:
-- Body starts at byte `21`
-- Body ends at byte `block_size` (`108`)
-- Body length is `108 - 21 = 87`
-- With `messages_in_block = 3`, each message is `87 / 3 = 29` bytes
-Function path: `decode_trade_rows_from_frame` (computes `msg_len`, then slices each message).
-
-4. Parse OPRA message header (first 12 bytes of each message):
-- byte `0`: `participant`
-- byte `1`: `category`
-- byte `2`: `type_code`
-- byte `3`: `indicator`
-- bytes `4..12`: transaction/reference fields (kept for routing, not all emitted yet)
-Function path: `parse_message_header`.
-
-5. Parse category-specific body (`q` and `k` currently):
-- If `category == 'q'` (29-byte message): parse short quote body fields
-  (`symbol_root`, expiration block, strike, bid/ask, sizes)
-- If `category == 'k'` (43-byte message): parse long quote body fields
-- Build `osi_symbol` from root + expiration + call/put + strike
-- Emit one parquet row with block/message metadata plus decoded quote columns
-Function path: `parse_short_quote_row` / `parse_long_quote_row` -> return `DecodedTradeRow` -> `arrow_sink::write_trades_parquet`.
 
 Note: current `*_trades.parquet` is quote-focused (`q`/`k`) research output. It is intentionally not full OPRA trade-print coverage yet.
 
