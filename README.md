@@ -148,11 +148,22 @@ Decoded:
 4. Parse 12-byte message header.
 5. Decode `q` and `k` quote-family rows into `DecodedTradeRow`.
 
+Current decoder architecture in code:
+
+- Frame loop: `decode_trades_with_parallelism` -> `decode_trade_rows_from_frame`
+- Message keying: build `MessageDispatchKey { category, type_code, indicator }`
+- Spec routing: `classify_message_family(...)` -> `decode_message_by_spec(...)`
+- Family parser (implemented): `parse_short_quote_row` (`q`), `parse_long_quote_row` (`k`), `parse_equity_index_last_sale_row` (`a`)
+- Row sink: `arrow_sink::write_trades_parquet(...)`
+
+This gives us a production-style extension point: add a new family parser and wire it in
+`decode_message_by_spec` without changing the rest of the pipeline.
+
 #### What “Production-Like” Still Requires
 
 - Full dispatch by `category + type + indicator` across OPRA message families (not just `q/k`)
 - Exact appendage handling (none/single/double) where spec requires it
-- Full trade-print family parsing to populate true trade fields (`price/size/conditions/...`)
+- Broader trade-print family parsing beyond initial `a` implementation to populate all true trade fields (`price/size/conditions/...`)
 - Category-specific handling for variable-length administrative/control messages
 
 ---

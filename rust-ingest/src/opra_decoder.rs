@@ -81,6 +81,28 @@ struct ParsedMessageHeader {
     indicator: u8,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct MessageDispatchKey {
+    category: u8,
+    type_code: u8,
+    indicator: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpraMessageFamily {
+    QuoteShort,
+    QuoteLong,
+    EquityIndexLastSale,
+    UnderlyingValueLastSale,
+    OpenInterest,
+    EndOfDaySummary,
+    TimedQuote,
+    Recap,
+    Administrative,
+    Control,
+    Other,
+}
+
 /// Skeleton decoder: replace with real OPRA Pillar parsing.
 pub async fn read_pcap_file(path: &str) -> Result<Vec<u8>> {
     let mut file = File::open(path).await?;
@@ -236,13 +258,13 @@ fn decode_trade_rows_from_frame(packet_index: usize, frame: &[u8]) -> Vec<Decode
             continue;
         };
 
-        // v1: port notebook logic for "q" and "k" categories first.
-        // These are quote-like OPRA rows but give a structured and research-ready decoding path.
-        let row = match header.category {
-            b'q' => parse_short_quote_row(packet_index, message_index, block_header, header, message_bytes),
-            b'k' => parse_long_quote_row(packet_index, message_index, block_header, header, message_bytes),
-            _ => None,
-        };
+        let row = decode_message_by_spec(
+            packet_index,
+            message_index,
+            block_header,
+            header,
+            message_bytes,
+        );
         if let Some(row) = row {
             out.push(row);
         }
@@ -374,6 +396,117 @@ fn parse_message_header(message: &[u8]) -> Option<ParsedMessageHeader> {
         category: *message.get(1)?,
         type_code: *message.get(2)?,
         indicator: *message.get(3)?,
+    })
+}
+
+#[must_use]
+fn classify_message_family(key: MessageDispatchKey) -> OpraMessageFamily {
+    let _ = key.type_code;
+    let _ = key.indicator;
+    match key.category {
+        b'q' => OpraMessageFamily::QuoteShort,
+        b'k' => OpraMessageFamily::QuoteLong,
+        b'a' => OpraMessageFamily::EquityIndexLastSale,
+        b'd' => OpraMessageFamily::UnderlyingValueLastSale,
+        b'f' => OpraMessageFamily::OpenInterest,
+        b'n' => OpraMessageFamily::EndOfDaySummary,
+        b't' => OpraMessageFamily::TimedQuote,
+        b'r' => OpraMessageFamily::Recap,
+        b'C' => OpraMessageFamily::Administrative,
+        b'H' => OpraMessageFamily::Control,
+        _ => OpraMessageFamily::Other,
+    }
+}
+
+fn decode_message_by_spec(
+    packet_index: usize,
+    message_index: usize,
+    block: ParsedBlockHeader,
+    header: ParsedMessageHeader,
+    message: &[u8],
+) -> Option<DecodedTradeRow> {
+    let key = MessageDispatchKey {
+        category: header.category,
+        type_code: header.type_code,
+        indicator: header.indicator,
+    };
+
+    match classify_message_family(key) {
+        OpraMessageFamily::QuoteShort => {
+            parse_short_quote_row(packet_index, message_index, block, header, message)
+        }
+        OpraMessageFamily::QuoteLong => {
+            parse_long_quote_row(packet_index, message_index, block, header, message)
+        }
+        OpraMessageFamily::EquityIndexLastSale => {
+            parse_equity_index_last_sale_row(packet_index, message_index, block, header, message)
+        }
+        // Explicitly routed but not implemented yet.
+        OpraMessageFamily::UnderlyingValueLastSale
+        | OpraMessageFamily::OpenInterest
+        | OpraMessageFamily::EndOfDaySummary
+        | OpraMessageFamily::TimedQuote
+        | OpraMessageFamily::Recap
+        | OpraMessageFamily::Administrative
+        | OpraMessageFamily::Control
+        | OpraMessageFamily::Other => None,
+    }
+}
+
+fn parse_equity_index_last_sale_row(
+    packet_index: usize,
+    message_index: usize,
+    block: ParsedBlockHeader,
+    header: ParsedMessageHeader,
+    message: &[u8],
+) -> Option<DecodedTradeRow> {
+    // OPRA category 'a' base layout:
+    // 12-byte message header + 31-byte body = 43 bytes total.
+    if message.len() < 43 {
+        return None;
+    }
+    let body = message.get(12..43)?;
+    let symbol_raw = body.get(0..5)?;
+    let symbol_root = std::str::from_utf8(symbol_raw).ok()?.trim_end().to_string();
+    let exp = body.get(6..9)?;
+    let strike_den = *body.get(9)?;
+    let strike_raw = read_be_u32_at(body, 10)?;
+    let volume = read_be_u32_at(body, 14)?;
+    let premium_den = *body.get(18)?;
+    let premium_raw = read_be_u32_at(body, 19)?;
+    let trade_identifier = read_be_u32_at(body, 23)?;
+
+    let (yymmdd, cp) = decode_exp_block(exp);
+    let strike = as_price_u32(strike_raw, strike_den);
+    let osi_symbol = build_osi_symbol(&symbol_root, &yymmdd, cp, strike);
+    let block_timestamp_ns = u64::from(block.block_ts_sec)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(u64::from(block.block_ts_nsec));
+    let message_type = char::from(header.type_code);
+    let action = Some(message_type.to_string());
+
+    Some(DecodedTradeRow {
+        packet_index: u64::try_from(packet_index).unwrap_or(u64::MAX),
+        block_sequence: u64::from(block.block_sequence),
+        block_timestamp_ns,
+        block_timestamp_utc: format_unix_ns_to_utc(block_timestamp_ns),
+        message_index_in_block: u64::try_from(message_index).unwrap_or(u64::MAX),
+        participant: char::from(header.participant).to_string(),
+        category: char::from(header.category).to_string(),
+        type_code: message_type.to_string(),
+        indicator: char::from(header.indicator).to_string(),
+        symbol_root: Some(symbol_root),
+        osi_symbol: Some(osi_symbol),
+        bid: None,
+        ask: None,
+        bid_size: None,
+        ask_size: None,
+        price: Some(as_price_u32(premium_raw, premium_den)),
+        size: Some(u64::from(volume)),
+        side: None,
+        action,
+        // Use Trade Identifier as a stable per-trade flag-style field for research joins.
+        flags: Some(u64::from(trade_identifier)),
     })
 }
 
@@ -620,6 +753,76 @@ mod tests {
     fn formats_block_timestamp_to_utc() {
         let ts = format_unix_ns_to_utc(1_692_714_600_005_955_584);
         assert_eq!(ts, "2023-08-22T14:30:00.005955584Z");
+    }
+
+    #[test]
+    fn classifies_message_families() {
+        let q = MessageDispatchKey {
+            category: b'q',
+            type_code: b' ',
+            indicator: b'A',
+        };
+        let k = MessageDispatchKey {
+            category: b'k',
+            type_code: b' ',
+            indicator: b'A',
+        };
+        let a = MessageDispatchKey {
+            category: b'a',
+            type_code: b'A',
+            indicator: b' ',
+        };
+        assert_eq!(classify_message_family(q), OpraMessageFamily::QuoteShort);
+        assert_eq!(classify_message_family(k), OpraMessageFamily::QuoteLong);
+        assert_eq!(
+            classify_message_family(a),
+            OpraMessageFamily::EquityIndexLastSale
+        );
+    }
+
+    #[test]
+    fn parses_equity_index_last_sale_row() {
+        let mut message = vec![0_u8; 43];
+        // Message header
+        message[0] = b'C'; // participant
+        message[1] = b'a'; // category
+        message[2] = b'A'; // type
+        message[3] = b' '; // indicator
+
+        // Body at offset 12
+        message[12..17].copy_from_slice(b"SPY  ");
+        // reserved at 17
+        message[18] = b'T'; // expiration month code (put, Aug)
+        message[19] = 30; // day
+        message[20] = 23; // year
+        message[21] = b'A'; // strike denominator (1 dp)
+        message[22..26].copy_from_slice(&4230_u32.to_be_bytes()); // strike 423.0
+        message[26..30].copy_from_slice(&271_u32.to_be_bytes()); // volume
+        message[30] = b'B'; // premium denominator (2 dp)
+        message[31..35].copy_from_slice(&49_u32.to_be_bytes()); // premium 0.49
+        message[35..39].copy_from_slice(&194_u32.to_be_bytes()); // trade identifier
+
+        let block = ParsedBlockHeader {
+            block_size: 43,
+            messages_in_block: 1,
+            block_sequence: 123,
+            block_ts_sec: 1_692_714_600,
+            block_ts_nsec: 5_955_584,
+        };
+        let header = ParsedMessageHeader {
+            participant: b'C',
+            category: b'a',
+            type_code: b'A',
+            indicator: b' ',
+        };
+
+        let row = parse_equity_index_last_sale_row(10, 0, block, header, &message).expect("row");
+        assert_eq!(row.category, "a");
+        assert_eq!(row.type_code, "A");
+        assert_eq!(row.osi_symbol.as_deref(), Some("SPY   230830P00423000"));
+        assert!((row.price.unwrap_or_default() - 0.49).abs() < 1e-9);
+        assert_eq!(row.size, Some(271));
+        assert_eq!(row.flags, Some(194));
     }
 
 }
