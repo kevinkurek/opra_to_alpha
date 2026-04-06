@@ -47,7 +47,7 @@ fn decode_bench(c: &mut Criterion) {
 
     let rayon_threads = std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
-        .unwrap_or(4);
+        .unwrap_or(1);
 
     for (label, pcap_path) in pcap_paths {
         let Some(pcap_bytes) = load_pcap(&pcap_path) else {
@@ -64,7 +64,7 @@ fn decode_bench(c: &mut Criterion) {
 
         group.bench_function(BenchmarkId::new("rayon", format!("threads={rayon_threads}")), |b| {
             b.iter(|| {
-                let result = opra_decoder::decode_pcap_with_parallelism(
+                let result = opra_decoder::decode_pcap_headers_schema(
                     black_box(&pcap_bytes),
                     rayon_threads,
                 );

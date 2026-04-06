@@ -5,17 +5,25 @@ Rust-based OPRA PCAP ingestion.
 A full local **lakehouse stack** for data ingestion, query federation, and orchestration—integrating Trino, Apache Iceberg, MinIO (S3-compatible object store), Postgres (metadata + Airflow DB), and Apache Airflow.
 
 ---
+### Design Philosophy V1
+* The V1 philosophy was to keep it as simple as possible and simply be able to parse PCAP files in batch. With that in mind, we didn't focus on a streaming aspect. Right now, the PCAP files are a reasonable size such that they can be read entirely into memory. This is common for many daily data engineering tasks. Thus this pure v1 build with in-memory batch processing works fine for the current PCAP sizes.
+
+* For the alternative v2 and beyond, we will focus on streaming PCAPs that cannot fit in memory, such that we will have to run the pcap decoding sequentially or in small batches. Thus, parallelizing with rayon may not make as much sense at that point in time. It was found during the v1 build that Rayon was actually slower when the batch size was small (like 10,000 packets at a time) because of the overhead it adds, but really showed significant gains when the packet parsing was in the millions to tens of millions.
+
+* V1 allows significant throughput for the current PCAP sizes but latency is higher than it would be in a streaming approach since the entire PCAP must be read into memory before processing can begin.
+
+---
 
 ```bash
 # run the rust ingest binary on a sample pcap
 cd rust-ingest
-cargo run --release -- --pcap ./pcap_samples/ny4-small-10k.pcap --decode-trades
+cargo run --release -- --pcap ./pcap_samples/ny4-small-10k.pcap
 >>
   # Output 2 schemas:
-  1. wrote parsed parquet to "./pcap_samples/ny4-small-10k_parsed.parquet" with 10000 rows
+  1. wrote header parquet to "./pcap_samples/ny4-small-10k_header.parquet" with 10000 rows
   2. wrote "./pcap_samples/ny4-small-10k_trades.parquet" with 14440 decoded trade rows
 
-  parsed schema (`*_parsed.parquet`):
+  header schema (`*_header.parquet`):
   - packet_index: UInt64 NOT NULL
   - udp_payload_len: UInt64 NOT NULL
   - block_size: UInt64 NOT NULL

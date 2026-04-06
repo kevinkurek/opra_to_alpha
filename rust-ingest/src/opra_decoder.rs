@@ -33,7 +33,7 @@ pub struct DecodeStats {
 }
 
 #[derive(Debug, Clone)]
-pub struct ParsedOpraRow {
+pub struct HeaderOpraRow {
     pub packet_index: u64,
     pub udp_payload_len: u64,
     pub block_size: u64,
@@ -111,19 +111,11 @@ pub async fn read_pcap_file(path: &str) -> Result<Vec<u8>> {
     Ok(buffer)
 }
 
-/// Synchronous decode over already-loaded PCAP bytes.
-pub fn decode_pcap(buffer: &[u8]) -> Result<(DecodeStats, Vec<ParsedOpraRow>)> {
-    let parallel = std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(1);
-    decode_pcap_with_parallelism(buffer, parallel)
-}
-
 /// Synchronous decode over already-loaded PCAP bytes with explicit thread count.
-pub fn decode_pcap_with_parallelism(
+pub fn decode_pcap_headers_schema(
     buffer: &[u8],
     parallel: usize,
-) -> Result<(DecodeStats, Vec<ParsedOpraRow>)> {
+) -> Result<(DecodeStats, Vec<HeaderOpraRow>)> {
     let capture = PcapCapture::from_file(buffer)
         .map_err(|error| anyhow!("failed to parse pcap: {error}"))?;
 
@@ -170,7 +162,7 @@ pub fn decode_pcap_with_parallelism(
 }
 
 /// Decode quote/trade-like OPRA message rows in parallel for research workflows.
-pub fn decode_trades_with_parallelism(
+pub fn decode_pcap_trades_schema(
     buffer: &[u8],
     parallel: usize,
 ) -> Result<Vec<DecodedTradeRow>> {
@@ -204,7 +196,7 @@ pub fn decode_trades_with_parallelism(
     Ok(rows)
 }
 
-fn decode_legacy_frame(packet_index: usize, frame: &[u8]) -> (DecodeStats, Option<ParsedOpraRow>) {
+fn decode_legacy_frame(packet_index: usize, frame: &[u8]) -> (DecodeStats, Option<HeaderOpraRow>) {
     let mut local = DecodeStats::default();
 
     // Count the legacy packet regardless of whether it contains IPv4/UDP/OPRA.
@@ -214,7 +206,7 @@ fn decode_legacy_frame(packet_index: usize, frame: &[u8]) -> (DecodeStats, Optio
     if let Some(udp_payload) = extract_udp_payload(frame) {
         if let Some((block_size, message_count)) = parse_opra_block_header(udp_payload) {
             local.messages = local.messages.saturating_add(u64::from(message_count));
-            parsed_row = Some(ParsedOpraRow {
+            parsed_row = Some(HeaderOpraRow {
                 packet_index: u64::try_from(packet_index).unwrap_or(u64::MAX),
                 udp_payload_len: u64::try_from(udp_payload.len()).unwrap_or(u64::MAX),
                 block_size: u64::from(block_size),

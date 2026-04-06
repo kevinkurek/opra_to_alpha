@@ -7,35 +7,9 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::info;
-use crate::opra_decoder::{DecodedTradeRow, ParsedOpraRow};
+use crate::opra_decoder::{DecodedTradeRow, HeaderOpraRow};
 
-pub fn write_demo_parquet(path: &str) -> Result<PathBuf> {
-
-    // logging
-    info!("writing demo parquet to {:?}", path);
-
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("symbol", DataType::Utf8, false),
-        Field::new("msg_count", DataType::Int64, false),
-    ]));
-
-    let mut sym = StringBuilder::new();
-    let mut cnt = Int64Builder::new();
-    sym.append_value("AAPL240927C00190000");
-    cnt.append_value(42);
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![Arc::new(sym.finish()), Arc::new(cnt.finish())],
-    )?;
-
-    let file = File::create(path)?;
-    let mut writer = ArrowWriter::try_new(file, schema, None)?;
-    writer.write(&batch)?;
-    writer.close()?;
-    Ok(PathBuf::from(path))
-}
-
-pub fn write_parsed_parquet(path: &str, rows: &[ParsedOpraRow]) -> Result<PathBuf> {
+pub fn write_header_parquet(path: &str, rows: &[HeaderOpraRow]) -> Result<PathBuf> {
     info!("writing parsed parquet to {:?} with {} rows", path, rows.len());
 
     let schema = Arc::new(Schema::new(vec![
@@ -222,6 +196,7 @@ pub fn write_trades_parquet(path: &str, rows: &[DecodedTradeRow]) -> Result<Path
     Ok(PathBuf::from(path))
 }
 
+#[allow(dead_code)]
 pub async fn upload_to_minio(
     endpoint: &str,
     access_key: &str,
@@ -268,4 +243,31 @@ pub async fn upload_to_minio(
         .await?;
 
     Ok(())
+}
+
+#[allow(dead_code)]
+pub fn write_demo_parquet(path: &str) -> Result<PathBuf> {
+
+    // logging
+    info!("writing demo parquet to {:?}", path);
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("symbol", DataType::Utf8, false),
+        Field::new("msg_count", DataType::Int64, false),
+    ]));
+
+    let mut sym = StringBuilder::new();
+    let mut cnt = Int64Builder::new();
+    sym.append_value("AAPL240927C00190000");
+    cnt.append_value(42);
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(sym.finish()), Arc::new(cnt.finish())],
+    )?;
+
+    let file = File::create(path)?;
+    let mut writer = ArrowWriter::try_new(file, schema, None)?;
+    writer.write(&batch)?;
+    writer.close()?;
+    Ok(PathBuf::from(path))
 }
