@@ -57,18 +57,18 @@ async fn main() -> Result<()> {
         rows.len()
     );
 
-    let local_path = local_parquet_output_path(&args.pcap);
+    let local_path = local_parquet_output_path(&args.pcap, "header");
     let local_path = arrow_sink::write_header_parquet(&local_path, &rows)?;
     info!("wrote {:?} with {} header rows", &local_path, rows.len());
 
     let pcap_for_trades = Arc::clone(&pcap_bytes);
     let trade_rows = tokio::task::spawn_blocking(move || {
-        opra_decoder::decode_pcap_trades_schema(&pcap_for_trades.clone(), parallel)
+        opra_decoder::decode_pcap_trades_schema_v2(&pcap_for_trades, parallel)
     })
     .await
     .context("trade decode task failed to join")??;
 
-    let trades_path = local_parquet_output_path(&args.pcap);
+    let trades_path = local_parquet_output_path(&args.pcap, "trades");
     let trades_path = arrow_sink::write_trades_parquet(&trades_path, &trade_rows)?;
     info!(
         "wrote {:?} with {} decoded trade rows",
@@ -79,11 +79,11 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn local_parquet_output_path(pcap_path: &str) -> String {
+fn local_parquet_output_path(pcap_path: &str, schema: &str) -> String {
     let stem = Path::new(pcap_path)
         .file_stem()
         .and_then(std::ffi::OsStr::to_str)
         .filter(|name| !name.is_empty())
         .unwrap_or("opra");
-    format!("./pcap_samples/{}_header.parquet", stem)
+    format!("./pcap_samples/{}_{}.parquet", stem, schema)
 }

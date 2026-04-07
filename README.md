@@ -13,6 +13,15 @@ A full local **lakehouse stack** for data ingestion, query federation, and orche
 * V1 allows significant throughput for the current PCAP sizes but latency is higher than it would be in a streaming approach since the entire PCAP must be read into memory before processing can begin.
 
 ---
+### Lessons Learned
+* Parsing PCAPs in batch works well for the current file sizes, but for larger PCAPs that cannot fit in memory, a streaming approach will be required.
+* Rayon parallelization is beneficial for large batch sizes (millions of packets) but can add overhead for smaller batch sizes (10k packets).
+* The V1 approach trades off latency for throughput since the entire PCAP must be read into memory before processing begins.
+* `decode_trade_rows_from_frame_v2` fixed missing trade reconciliation by replacing equal-split message parsing with a sequential cursor-based walk through each OPRA block; each message length is now resolved from `(category, type, indicator)` (with guarded fallback), which prevents valid mixed-length blocks from being dropped and preserves accurate trade extraction for category `a`. In plain English: instead of guessing that every message in a packet is the same size, we now read them one-by-one at their real sizes, which stopped us from skipping valid trades.
+
+
+---
+### Run the Rust Ingest Binary
 
 ```bash
 # run the rust ingest binary on a sample pcap

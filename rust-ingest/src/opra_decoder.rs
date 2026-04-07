@@ -196,6 +196,42 @@ pub fn decode_pcap_trades_schema(
     Ok(rows)
 }
 
+/// V2 trades decoder that walks each OPRA block sequentially using per-message lengths.
+/// This avoids assuming equal message sizes within a block.
+pub fn decode_pcap_trades_schema_v2(
+    buffer: &[u8],
+    parallel: usize,
+) -> Result<Vec<DecodedTradeRow>> {
+    let capture = PcapCapture::from_file(buffer)
+        .map_err(|error| anyhow!("failed to parse pcap: {error}"))?;
+
+    let legacy_frames: Vec<&[u8]> = capture
+        .iter()
+        .filter_map(|block| match block {
+            PcapBlock::Legacy(legacy) => Some(legacy.data),
+            _ => None,
+        })
+        .collect();
+
+    let mut rows = ThreadPoolBuilder::new()
+        .num_threads(parallel)
+        .build()
+        .map_err(|error| anyhow!("failed to build rayon pool: {error}"))?
+        .install(|| {
+            legacy_frames
+                .par_iter()
+                .enumerate()
+                .map(|(packet_index, &frame)| decode_trade_rows_from_frame_v2(packet_index, frame))
+                .reduce(Vec::new, |mut acc, mut local| {
+                    acc.append(&mut local);
+                    acc
+                })
+        });
+
+    rows.sort_unstable_by_key(|row| (row.packet_index, row.message_index_in_block));
+    Ok(rows)
+}
+
 fn decode_legacy_frame(packet_index: usize, frame: &[u8]) -> (DecodeStats, Option<HeaderOpraRow>) {
     let mut local = DecodeStats::default();
 
@@ -263,6 +299,113 @@ fn decode_trade_rows_from_frame(packet_index: usize, frame: &[u8]) -> Vec<Decode
     }
 
     out
+}
+
+fn decode_trade_rows_from_frame_v2(packet_index: usize, frame: &[u8]) -> Vec<DecodedTradeRow> {
+    let Some(udp_payload) = extract_udp_payload(frame) else {
+        return Vec::new();
+    };
+    let Some(block_header) = parse_block_header(udp_payload) else {
+        return Vec::new();
+    };
+    let Some(messages_slice) = udp_payload.get(OPRA_BLOCK_HEADER_LEN..usize::from(block_header.block_size)) else {
+        return Vec::new();
+    };
+
+    let msg_count = usize::from(block_header.messages_in_block);
+    if msg_count == 0 {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    let mut cursor = 0_usize;
+
+    for message_index in 0..msg_count {
+        let remaining_messages = msg_count.saturating_sub(message_index);
+        let remaining_bytes = messages_slice.len().saturating_sub(cursor);
+        if remaining_messages == 0 || remaining_bytes < 12 {
+            break;
+        }
+
+        let Some(message_window) = messages_slice.get(cursor..) else {
+            break;
+        };
+        let Some(header) = parse_message_header(message_window) else {
+            break;
+        };
+
+        let Some(msg_len) =
+            resolve_message_length_v2(header, message_window, remaining_bytes, remaining_messages)
+        else {
+            break;
+        };
+        let end = cursor.saturating_add(msg_len);
+        let Some(message_bytes) = messages_slice.get(cursor..end) else {
+            break;
+        };
+
+        if let Some(row) = decode_message_by_spec(
+            packet_index,
+            message_index,
+            block_header,
+            header,
+            message_bytes,
+        ) {
+            out.push(row);
+        }
+
+        cursor = end;
+    }
+
+    out
+}
+
+fn resolve_message_length_v2(
+    header: ParsedMessageHeader,
+    message_window: &[u8],
+    remaining_bytes: usize,
+    remaining_messages: usize,
+) -> Option<usize> {
+    let fixed_len = match header.category {
+        b'a' | b'k' => Some(43_usize),
+        b'q' => Some(29_usize),
+        b'H' => Some(12_usize),
+        _ => None,
+    };
+
+    if let Some(len) = fixed_len {
+        if is_plausible_message_len(len, remaining_bytes, remaining_messages) {
+            return Some(len);
+        }
+    }
+
+    // Administrative messages are variable length and include a data length field.
+    if header.category == b'C' {
+        if let Some(text_len) = read_be_u16_at(message_window, 12).map(usize::from) {
+            let admin_len = 14_usize.saturating_add(text_len);
+            if is_plausible_message_len(admin_len, remaining_bytes, remaining_messages) {
+                return Some(admin_len);
+            }
+        }
+    }
+
+    fallback_equal_split_len_v2(remaining_bytes, remaining_messages)
+}
+
+fn is_plausible_message_len(len: usize, remaining_bytes: usize, remaining_messages: usize) -> bool {
+    if len < 12 || len > remaining_bytes || remaining_messages == 0 {
+        return false;
+    }
+    let min_tail = remaining_messages.saturating_sub(1).saturating_mul(12);
+    remaining_bytes.saturating_sub(len) >= min_tail
+}
+
+fn fallback_equal_split_len_v2(remaining_bytes: usize, remaining_messages: usize) -> Option<usize> {
+    if remaining_messages == 0 {
+        return None;
+    }
+    let len = remaining_bytes / remaining_messages;
+    (len >= 12).then_some(len)
 }
 
 #[must_use]
