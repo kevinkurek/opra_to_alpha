@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 #[path = "../src/opra_decoder.rs"]
 mod opra_decoder;
 
+/// Find PCAP files for benchmarking (env override first, then known sample files).
 fn resolve_pcap_paths() -> Vec<(String, PathBuf)> {
     let from_env = std::env::var("OPRA_BENCH_PCAP").ok().map(PathBuf::from);
     if let Some(path) = from_env {
@@ -32,10 +33,12 @@ fn resolve_pcap_paths() -> Vec<(String, PathBuf)> {
         .collect()
 }
 
+/// Read one benchmark PCAP into memory.
 fn load_pcap(path: &Path) -> Option<Vec<u8>> {
     fs::read(path).ok()
 }
 
+/// Criterion benchmark for header decode throughput across available sample sizes.
 fn decode_bench(c: &mut Criterion) {
     let pcap_paths = resolve_pcap_paths();
     if pcap_paths.is_empty() {

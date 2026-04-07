@@ -103,7 +103,7 @@ enum OpraMessageFamily {
     Other,
 }
 
-/// Skeleton decoder: replace with real OPRA Pillar parsing.
+/// Read the full PCAP file into memory once so decode functions can reuse the bytes.
 pub async fn read_pcap_file(path: &str) -> Result<Vec<u8>> {
     let mut file = File::open(path).await?;
     let mut buffer = Vec::new();
@@ -111,7 +111,7 @@ pub async fn read_pcap_file(path: &str) -> Result<Vec<u8>> {
     Ok(buffer)
 }
 
-/// Synchronous decode over already-loaded PCAP bytes with explicit thread count.
+/// Parse per-packet OPRA block metadata (header schema) using Rayon for parallel frame decode.
 pub fn decode_pcap_headers_schema(
     buffer: &[u8],
     parallel: usize,
@@ -160,42 +160,6 @@ pub fn decode_pcap_headers_schema(
 
     Ok((stats, rows))
 }
-
-/// Decode quote/trade-like OPRA message rows in parallel for research workflows.
-pub fn decode_pcap_trades_schema(
-    buffer: &[u8],
-    parallel: usize,
-) -> Result<Vec<DecodedTradeRow>> {
-    let capture = PcapCapture::from_file(buffer)
-        .map_err(|error| anyhow!("failed to parse pcap: {error}"))?;
-
-    let legacy_frames: Vec<&[u8]> = capture
-        .iter()
-        .filter_map(|block| match block {
-            PcapBlock::Legacy(legacy) => Some(legacy.data),
-            _ => None,
-        })
-        .collect();
-
-    let mut rows = ThreadPoolBuilder::new()
-        .num_threads(parallel)
-        .build()
-        .map_err(|error| anyhow!("failed to build rayon pool: {error}"))?
-        .install(|| {
-            legacy_frames
-                .par_iter()
-                .enumerate()
-                .map(|(packet_index, &frame)| decode_trade_rows_from_frame(packet_index, frame))
-                .reduce(Vec::new, |mut acc, mut local| {
-                    acc.append(&mut local);
-                    acc
-                })
-        });
-
-    rows.sort_unstable_by_key(|row| (row.packet_index, row.message_index_in_block));
-    Ok(rows)
-}
-
 /// V2 trades decoder that walks each OPRA block sequentially using per-message lengths.
 /// This avoids assuming equal message sizes within a block.
 pub fn decode_pcap_trades_schema_v2(
@@ -232,6 +196,7 @@ pub fn decode_pcap_trades_schema_v2(
     Ok(rows)
 }
 
+/// Decode one legacy Ethernet frame into a lightweight header row plus packet/message counters.
 fn decode_legacy_frame(packet_index: usize, frame: &[u8]) -> (DecodeStats, Option<HeaderOpraRow>) {
     let mut local = DecodeStats::default();
 
@@ -254,53 +219,7 @@ fn decode_legacy_frame(packet_index: usize, frame: &[u8]) -> (DecodeStats, Optio
     (local, parsed_row)
 }
 
-fn decode_trade_rows_from_frame(packet_index: usize, frame: &[u8]) -> Vec<DecodedTradeRow> {
-    let Some(udp_payload) = extract_udp_payload(frame) else {
-        return Vec::new();
-    };
-    let Some(block_header) = parse_block_header(udp_payload) else {
-        return Vec::new();
-    };
-    let Some(messages_slice) = udp_payload.get(OPRA_BLOCK_HEADER_LEN..usize::from(block_header.block_size)) else {
-        return Vec::new();
-    };
-
-    let msg_count = usize::from(block_header.messages_in_block);
-    if msg_count == 0 || messages_slice.len() % msg_count != 0 {
-        return Vec::new();
-    }
-
-    let msg_len = messages_slice.len() / msg_count;
-    if msg_len < 12 {
-        return Vec::new();
-    }
-
-    let mut out = Vec::new();
-    for message_index in 0..msg_count {
-        let start = message_index.saturating_mul(msg_len);
-        let end = start.saturating_add(msg_len);
-        let Some(message_bytes) = messages_slice.get(start..end) else {
-            continue;
-        };
-        let Some(header) = parse_message_header(message_bytes) else {
-            continue;
-        };
-
-        let row = decode_message_by_spec(
-            packet_index,
-            message_index,
-            block_header,
-            header,
-            message_bytes,
-        );
-        if let Some(row) = row {
-            out.push(row);
-        }
-    }
-
-    out
-}
-
+/// Decode all trade-like rows from a single frame by walking OPRA messages one-by-one.
 fn decode_trade_rows_from_frame_v2(packet_index: usize, frame: &[u8]) -> Vec<DecodedTradeRow> {
     let Some(udp_payload) = extract_udp_payload(frame) else {
         return Vec::new();
@@ -360,6 +279,7 @@ fn decode_trade_rows_from_frame_v2(packet_index: usize, frame: &[u8]) -> Vec<Dec
     out
 }
 
+/// Decide how long the current message is based on category and known message layouts.
 fn resolve_message_length_v2(
     header: ParsedMessageHeader,
     message_window: &[u8],
@@ -392,6 +312,7 @@ fn resolve_message_length_v2(
     fallback_equal_split_len_v2(remaining_bytes, remaining_messages)
 }
 
+/// Basic guardrail: ensure a chosen message length leaves room for remaining message headers.
 fn is_plausible_message_len(len: usize, remaining_bytes: usize, remaining_messages: usize) -> bool {
     if len < 12 || len > remaining_bytes || remaining_messages == 0 {
         return false;
@@ -400,6 +321,7 @@ fn is_plausible_message_len(len: usize, remaining_bytes: usize, remaining_messag
     remaining_bytes.saturating_sub(len) >= min_tail
 }
 
+/// Last-resort length guess used when the message type is unknown.
 fn fallback_equal_split_len_v2(remaining_bytes: usize, remaining_messages: usize) -> Option<usize> {
     if remaining_messages == 0 {
         return None;
@@ -409,6 +331,7 @@ fn fallback_equal_split_len_v2(remaining_bytes: usize, remaining_messages: usize
 }
 
 #[must_use]
+/// Strip Ethernet/IP/UDP headers and return only UDP payload bytes.
 fn extract_udp_payload(frame: &[u8]) -> Option<&[u8]> {
     let min_frame_len = ETHERNET_HEADER_LEN
         .checked_add(IPV4_MIN_HEADER_LEN)?
@@ -475,12 +398,14 @@ fn extract_udp_payload(frame: &[u8]) -> Option<&[u8]> {
 }
 
 #[must_use]
+/// Return just the OPRA block size and message count for quick header stats collection.
 fn parse_opra_block_header(udp_payload: &[u8]) -> Option<(u16, u8)> {
     let block_header = parse_block_header(udp_payload)?;
     Some((block_header.block_size, block_header.messages_in_block))
 }
 
 #[must_use]
+/// Parse OPRA block-level fields (size, sequence, timestamp, message count).
 fn parse_block_header(udp_payload: &[u8]) -> Option<ParsedBlockHeader> {
     if udp_payload.len() < OPRA_BLOCK_HEADER_LEN {
         return None;
@@ -522,6 +447,7 @@ fn parse_block_header(udp_payload: &[u8]) -> Option<ParsedBlockHeader> {
 }
 
 #[must_use]
+/// Parse the fixed 12-byte OPRA message header.
 fn parse_message_header(message: &[u8]) -> Option<ParsedMessageHeader> {
     if message.len() < 12 {
         return None;
@@ -535,6 +461,7 @@ fn parse_message_header(message: &[u8]) -> Option<ParsedMessageHeader> {
 }
 
 #[must_use]
+/// Map raw message category/type/indicator into a parser family.
 fn classify_message_family(key: MessageDispatchKey) -> OpraMessageFamily {
     let _ = key.type_code;
     let _ = key.indicator;
@@ -553,6 +480,7 @@ fn classify_message_family(key: MessageDispatchKey) -> OpraMessageFamily {
     }
 }
 
+/// Route one message to the correct family parser and return a normalized row when supported.
 fn decode_message_by_spec(
     packet_index: usize,
     message_index: usize,
@@ -588,6 +516,7 @@ fn decode_message_by_spec(
     }
 }
 
+/// Parse OPRA category `a` (equity/index last sale) into a trade row.
 fn parse_equity_index_last_sale_row(
     packet_index: usize,
     message_index: usize,
@@ -645,6 +574,7 @@ fn parse_equity_index_last_sale_row(
     })
 }
 
+/// Parse OPRA short quote messages (`q`) into normalized quote fields.
 fn parse_short_quote_row(
     packet_index: usize,
     message_index: usize,
@@ -700,6 +630,7 @@ fn parse_short_quote_row(
     })
 }
 
+/// Parse OPRA long quote messages (`k`) into normalized quote fields.
 fn parse_long_quote_row(
     packet_index: usize,
     message_index: usize,
@@ -753,6 +684,7 @@ fn parse_long_quote_row(
     })
 }
 
+/// Decode OPRA expiration block bytes into `YYMMDD` and call/put code.
 fn decode_exp_block(exp_bytes: &[u8]) -> (String, char) {
     let (month, cp) = match exp_bytes.first().copied().map(char::from) {
         Some('A') => (1, 'C'),
@@ -788,6 +720,7 @@ fn decode_exp_block(exp_bytes: &[u8]) -> (String, char) {
     (yymmdd, cp)
 }
 
+/// Build a padded 21-character OSI option symbol from normalized parts.
 fn build_osi_symbol(root: &str, yymmdd: &str, cp: char, strike: f64) -> String {
     let strike_int = (strike * 1000.0).round();
     let strike_int = if strike_int.is_finite() && strike_int >= 0.0 {
@@ -798,6 +731,7 @@ fn build_osi_symbol(root: &str, yymmdd: &str, cp: char, strike: f64) -> String {
     format!("{root}   {yymmdd}{cp}{strike_int:08}")
 }
 
+/// Convert 16-bit raw price plus denominator code into decimal price.
 fn as_price_u16(raw: u16, den_code: u8) -> f64 {
     let den = match den_code {
         b'A' => 1_u32,
@@ -812,6 +746,7 @@ fn as_price_u16(raw: u16, den_code: u8) -> f64 {
     f64::from(raw) / 10_f64.powi(i32::try_from(den).unwrap_or(0))
 }
 
+/// Convert 32-bit raw price plus denominator code into decimal price.
 fn as_price_u32(raw: u32, den_code: u8) -> f64 {
     let den = match den_code {
         b'A' => 1_u32,
@@ -826,6 +761,7 @@ fn as_price_u32(raw: u32, den_code: u8) -> f64 {
     f64::from(raw) / 10_f64.powi(i32::try_from(den).unwrap_or(0))
 }
 
+/// Convert nanoseconds since epoch into RFC3339 UTC string.
 fn format_unix_ns_to_utc(timestamp_ns: u64) -> String {
     let secs = i64::try_from(timestamp_ns / 1_000_000_000).unwrap_or(i64::MAX);
     let nanos = u32::try_from(timestamp_ns % 1_000_000_000).unwrap_or(0);
@@ -837,11 +773,13 @@ fn format_unix_ns_to_utc(timestamp_ns: u64) -> String {
 }
 
 #[must_use]
+/// Safely read one byte at an offset.
 fn read_u8_at(data: &[u8], offset: usize) -> Option<u8> {
     data.get(offset).copied()
 }
 
 #[must_use]
+/// Safely read a big-endian `u16` at an offset.
 fn read_be_u16_at(data: &[u8], offset: usize) -> Option<u16> {
     let end = offset.checked_add(2)?;
     let bytes = data.get(offset..end)?;
@@ -850,6 +788,7 @@ fn read_be_u16_at(data: &[u8], offset: usize) -> Option<u16> {
 }
 
 #[must_use]
+/// Safely read a big-endian `u32` at an offset.
 fn read_be_u32_at(data: &[u8], offset: usize) -> Option<u32> {
     let end = offset.checked_add(4)?;
     let bytes = data.get(offset..end)?;

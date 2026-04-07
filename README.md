@@ -193,11 +193,23 @@ A useful mental model is:
 UDP payload
 └── OPRA block
     ├── block header
-    ├── message header #1
-    ├── message body #1
-    ├── message header #2
-    ├── message body #2
+    ├── message #1
+    │   ├── 12-byte message header
+    │   └── message body (variable length by category/type/indicator)
+    ├── message #2
+    │   ├── 12-byte message header
+    │   └── message body (can be a different length than message #1)
     └── ...
+```
+
+And this is the boundary issue we fixed:
+
+```text
+Old (incorrect for mixed messages in a block):
+total_message_bytes / message_count -> assumed fixed slice size for every message
+
+New (correct):
+read 12-byte header -> determine this message's real length -> advance cursor -> repeat
 ```
 
 Here is a synthetic but realistic raw byte example for a single OPRA block carrying one `k` quote message:

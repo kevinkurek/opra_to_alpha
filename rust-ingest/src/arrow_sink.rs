@@ -1,5 +1,5 @@
 use anyhow::Result;
-use arrow::array::{Float64Builder, Int64Builder, StringBuilder, UInt64Builder};
+use arrow::array::{Float64Builder, StringBuilder, UInt64Builder};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tracing::info;
 use crate::opra_decoder::{DecodedTradeRow, HeaderOpraRow};
 
+/// Write packet-level OPRA header rows to a parquet file.
 pub fn write_header_parquet(path: &str, rows: &[HeaderOpraRow]) -> Result<PathBuf> {
     info!("writing parsed parquet to {:?} with {} rows", path, rows.len());
 
@@ -48,6 +49,7 @@ pub fn write_header_parquet(path: &str, rows: &[HeaderOpraRow]) -> Result<PathBu
     Ok(PathBuf::from(path))
 }
 
+/// Write normalized quote/trade rows to parquet with nullable fields where data may be absent.
 pub fn write_trades_parquet(path: &str, rows: &[DecodedTradeRow]) -> Result<PathBuf> {
     info!("writing trades parquet to {:?} with {} rows", path, rows.len());
 
@@ -197,6 +199,7 @@ pub fn write_trades_parquet(path: &str, rows: &[DecodedTradeRow]) -> Result<Path
 }
 
 #[allow(dead_code)]
+/// Upload a local file to MinIO/S3 and create the bucket first if it does not exist.
 pub async fn upload_to_minio(
     endpoint: &str,
     access_key: &str,
@@ -243,31 +246,4 @@ pub async fn upload_to_minio(
         .await?;
 
     Ok(())
-}
-
-#[allow(dead_code)]
-pub fn write_demo_parquet(path: &str) -> Result<PathBuf> {
-
-    // logging
-    info!("writing demo parquet to {:?}", path);
-
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("symbol", DataType::Utf8, false),
-        Field::new("msg_count", DataType::Int64, false),
-    ]));
-
-    let mut sym = StringBuilder::new();
-    let mut cnt = Int64Builder::new();
-    sym.append_value("AAPL240927C00190000");
-    cnt.append_value(42);
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![Arc::new(sym.finish()), Arc::new(cnt.finish())],
-    )?;
-
-    let file = File::create(path)?;
-    let mut writer = ArrowWriter::try_new(file, schema, None)?;
-    writer.write(&batch)?;
-    writer.close()?;
-    Ok(PathBuf::from(path))
 }

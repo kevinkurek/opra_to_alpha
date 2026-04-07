@@ -29,6 +29,7 @@ struct Args {
 }
 
 #[tokio::main()]
+/// Entry point: read PCAP once, decode headers/trades, and write both parquet outputs.
 async fn main() -> Result<()> {
     telemetry::init();
     let args = Args::parse();
@@ -57,10 +58,12 @@ async fn main() -> Result<()> {
         rows.len()
     );
 
+    // Write OPRA headers schema to local file
     let local_path = local_parquet_output_path(&args.pcap, "header");
     let local_path = arrow_sink::write_header_parquet(&local_path, &rows)?;
     info!("wrote {:?} with {} header rows", &local_path, rows.len());
 
+    // Decode pcap trades schema
     let pcap_for_trades = Arc::clone(&pcap_bytes);
     let trade_rows = tokio::task::spawn_blocking(move || {
         opra_decoder::decode_pcap_trades_schema_v2(&pcap_for_trades, parallel)
@@ -68,6 +71,7 @@ async fn main() -> Result<()> {
     .await
     .context("trade decode task failed to join")??;
 
+    // Write OPRA trades schema to local file
     let trades_path = local_parquet_output_path(&args.pcap, "trades");
     let trades_path = arrow_sink::write_trades_parquet(&trades_path, &trade_rows)?;
     info!(
@@ -79,6 +83,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Build a local parquet output path from the PCAP filename and schema suffix.
 fn local_parquet_output_path(pcap_path: &str, schema: &str) -> String {
     let stem = Path::new(pcap_path)
         .file_stem()
