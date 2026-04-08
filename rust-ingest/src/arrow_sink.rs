@@ -1,3 +1,4 @@
+use crate::opra_decoder::{DecodedTradeRow, HeaderOpraRow};
 use anyhow::Result;
 use arrow::array::{Float64Builder, StringBuilder, UInt64Builder};
 use arrow::datatypes::{DataType, Field, Schema};
@@ -7,11 +8,14 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::info;
-use crate::opra_decoder::{DecodedTradeRow, HeaderOpraRow};
 
 /// Write packet-level OPRA header rows to a parquet file.
 pub fn write_header_parquet(path: &str, rows: &[HeaderOpraRow]) -> Result<PathBuf> {
-    info!("writing parsed parquet to {:?} with {} rows", path, rows.len());
+    info!(
+        "writing parsed parquet to {:?} with {} rows",
+        path,
+        rows.len()
+    );
 
     let schema = Arc::new(Schema::new(vec![
         Field::new("packet_index", DataType::UInt64, false),
@@ -51,7 +55,11 @@ pub fn write_header_parquet(path: &str, rows: &[HeaderOpraRow]) -> Result<PathBu
 
 /// Write normalized quote/trade rows to parquet with nullable fields where data may be absent.
 pub fn write_trades_parquet(path: &str, rows: &[DecodedTradeRow]) -> Result<PathBuf> {
-    info!("writing trades parquet to {:?} with {} rows", path, rows.len());
+    info!(
+        "writing trades parquet to {:?} with {} rows",
+        path,
+        rows.len()
+    );
 
     let schema = Arc::new(Schema::new(vec![
         Field::new("packet_index", DataType::UInt64, false),

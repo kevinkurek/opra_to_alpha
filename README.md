@@ -5,30 +5,34 @@ Rust-based OPRA PCAP ingestion.
 A full local **lakehouse stack** for data ingestion, query federation, and orchestration—integrating Trino, Apache Iceberg, MinIO (S3-compatible object store), Postgres (metadata + Airflow DB), and Apache Airflow.
 
 ---
-### Design Philosophy V1
-* The V1 philosophy was to keep it as simple as possible and simply be able to parse PCAP files in batch. With that in mind, we didn't focus on a streaming aspect. Right now, the PCAP files are a reasonable size such that they can be read entirely into memory. This is common for many daily data engineering tasks. Thus this pure v1 build with in-memory batch processing works fine for the current PCAP sizes.
+### Design Philosophy
+* Keep ingestion simple and fast for local research: load PCAPs in memory, decode in parallel, and write local parquet artifacts.
+* Current default run intentionally processes the three sample sizes (`10k`, `1m`, `10m`) to show how workload size impacts decode behavior.
+* The trades decoder uses a sequential cursor per OPRA block (real message lengths resolved from `category + type + indicator`), which avoids mixed-length block parsing errors.
 
-* For the alternative v2 and beyond, we will focus on streaming PCAPs that cannot fit in memory, such that we will have to run the pcap decoding sequentially or in small batches. Thus, parallelizing with rayon may not make as much sense at that point in time. It was found during the v1 build that Rayon was actually slower when the batch size was small (like 10,000 packets at a time) because of the overhead it adds, but really showed significant gains when the packet parsing was in the millions to tens of millions.
+---
 
-* V1 allows significant throughput for the current PCAP sizes but latency is higher than it would be in a streaming approach since the entire PCAP must be read into memory before processing can begin.
+### Tokio runtime decision
+* File reads are done with async I/O (`read_pcap_file` + `tokio::try_join!`) so the 3 PCAPs can be loaded concurrently without blocking the runtime thread, while CPU-heavy decode paths are moved into `tokio::task::spawn_blocking(...)` so parse work runs on the blocking pool and does not starve async tasks.
+* For now this is sufficient since `try_join!` interleaves the 3 PCAP file reads on the Root Task and we statically know the amount of PCAPs being processed; however, if the number of PCAPs to process were dynamic or very large, this approach would not scale as well since try_join! requires knowing all futures up front. In this case using `tokio::spawn` to spawn a new task for each file individually and then collecting them into a join_all could be a more scalable approach. Additionally, a semaphore could be used to limit concurrency so that only a bounded number of PCAPs are being read into memory at once rather than spawning unbounded tasks that could overwhelm memory.
+* Furthermore, if we move to a primary low-latency ingestion mode we would need to focus on streaming PCAP files which would likely have us use tokio streams to read packets as they arrive rather than loading entire PCAPs into memory before decoding.
 
 ---
 ### Lessons Learned
-* Parsing PCAPs in batch works well for the current file sizes, but for larger PCAPs that cannot fit in memory, a streaming approach will be required.
-* Rayon parallelization is beneficial for large batch sizes (millions of packets) but can add overhead for smaller batch sizes (10k packets).
-* The V1 approach trades off latency for throughput since the entire PCAP must be read into memory before processing begins.
-* `decode_trade_rows_from_frame_v2` fixed missing trade reconciliation by replacing equal-split message parsing with a sequential cursor-based walk through each OPRA block; each message length is now resolved from `(category, type, indicator)` (with guarded fallback), which prevents valid mixed-length blocks from being dropped and preserves accurate trade extraction for category `a`. In plain English: instead of guessing that every message in a packet is the same size, we now read them one-by-one at their real sizes, which stopped us from skipping valid trades.
+* Batch decode is practical and fast for these sample sizes.
+* Rayon helps more as packet volume grows; tiny files can still pay parallel overhead.
+* End-to-end throughput is good in-memory, but a future streaming mode would reduce startup latency and memory pressure on very large captures.
 
 
 ---
 ### Run the Rust Ingest Binary
 
 ```bash
-# run the rust ingest binary on a sample pcap
+# run the rust ingest binary on all 3 sample pcaps (10k, 1m, 10m)
 cd rust-ingest
-cargo run --release -- --pcap ./pcap_samples/ny4-small-10k.pcap
+cargo run --release
 >>
-  # Output 2 schemas:
+  # Output 2 schemas per PCAP (header + trades):
   1. wrote header parquet to "./pcap_samples/ny4-small-10k_header.parquet" with 10000 rows
   2. wrote "./pcap_samples/ny4-small-10k_trades.parquet" with 14440 decoded trade rows
 
@@ -59,6 +63,12 @@ cargo run --release -- --pcap ./pcap_samples/ny4-small-10k.pcap
   - side: Utf8 NULL
   - action: Utf8 NULL
   - flags: UInt64 NULL
+
+# optional: point to a different samples directory
+cargo run --release -- --pcap-dir ./pcap_samples
+
+# optional: pin rayon worker count
+cargo run --release -- --parallel 8
 ```
 
 
@@ -134,8 +144,42 @@ tshark -r ny4-opra-new-a-20230822T143000.pcap -c 1 -T json > example_packets.jso
 | **→** | `→` | Direction of the packet flow. |
 | **Destination** | `224.0.204.40` | Multicast group address — identifies the OPRA channel. |
 | **Protocol** | `UDP` | Transport protocol (OPRA uses UDP multicast). |
-| **Length** | `154` | Total frame size (bytes on wire, including headers). |
+| **Length** | `154` | Total frame size (bytes on wire, ETH header, IPv4, UDP, including headers). |
 | **Info** | `45040 → 45040 Len=108` | UDP layer summary: source port, destination port, and payload size. |
+
+---
+
+## PCAP Structure Overview
+```bash
+# High level structure + OPRA-focused depth
+PCAP Packet Record                                          # tshark summary example: UDP 154 ... Len=108
+└── Ethernet Frame                                          # 154 total bytes
+      ├── Ethernet Header (eth.*)                             # 14 bytes
+      ├── VLAN Header (vlan.*)                                # 4 bytes (when present)
+      └── IPv4 Packet (ip.*)                                # 136 bytes after Ethernet
+            ├── IPv4 Header                                   # 20 bytes (no options)
+            └── UDP Datagram (udp.*)                        # 116 bytes after IPv4
+                  ├── UDP Header                              # 8 bytes
+                  └── UDP Payload (udp.payload / data.data) # 108 bytes = tshark `Len=108`
+                        └── OPRA Transmission Block         # begins at first UDP payload byte
+                              ├── OPRA Block Header         # first 21 bytes
+                              │     ├── Block Size
+                              │     ├── Data Feed Indicator ('O')
+                              │     ├── Retransmission Indicator
+                              │     ├── Session Indicator
+                              │     ├── Block Sequence Number
+                              │     ├── Messages In Block
+                              │     ├── Timestamp (sec + ns)
+                              │     └── Checksum
+                              └── OPRA Messages             # remaining bytes in payload = 108 - 21 = 87 bytes
+                                    ├── Message #1
+                                    │     ├── 12-byte Message Header
+                                    │     └── Message Body
+                                    ├── Message #2
+                                    │     ├── 12-byte Message Header
+                                    │     └── Message Body
+                                    └── ...
+```
 
 ---
 
@@ -183,33 +227,23 @@ Current OPRA references:
 
 #### OPRA PCAP Decoding Example
 
-When decoding an OPRA PCAP, it helps to think in layers rather than assuming one packet equals one quote. An Ethernet frame contains an IP packet, the IP packet contains a UDP datagram, the UDP payload contains an OPRA block, and that OPRA block contains one or more OPRA messages. The OPRA block starts with a single block header that applies to the whole block. After that, each individual OPRA message has its own message header followed by its own body. So yes, there can be multiple message headers inside one block, because a single block may carry multiple OPRA messages.
-
-The block header is the outer framing for the OPRA payload. It tells you things like ordering, timing, and how many messages you should expect to parse from this block. The message header is different: it applies only to one message and tells you what that message is, such as a long quote (`k`), short quote (`q`), trade, and so on. In practice, your parser reads the block header once, then loops over the message count, reading one message header and one message body at a time.
-
-A useful mental model is:
+Reminder of mental model from above:
 
 ```text
-UDP payload
-└── OPRA block
-    ├── block header
-    ├── message #1
-    │   ├── 12-byte message header
-    │   └── message body (variable length by category/type/indicator)
-    ├── message #2
-    │   ├── 12-byte message header
-    │   └── message body (can be a different length than message #1)
-    └── ...
-```
-
-And this is the boundary issue we fixed:
-
-```text
-Old (incorrect for mixed messages in a block):
-total_message_bytes / message_count -> assumed fixed slice size for every message
-
-New (correct):
-read 12-byte header -> determine this message's real length -> advance cursor -> repeat
+└── OPRA Transmission Block         # begins at first UDP payload byte
+      ├── OPRA Block Header         # first 21 bytes
+      │     ├── Block Size
+      │     ├── Data Feed Indicator ('O')
+      │     ├── Retransmission Indicator
+      │     ├── Session Indicator
+      │     ├── Block Sequence Number
+      │     ├── Messages In Block
+      │     ├── Timestamp (sec + ns)
+      │     └── Checksum
+      └── OPRA Messages             # remaining bytes in payload
+            ├── Message #1
+                  ├── 12-byte Message Header
+                  └── "k" Message Body
 ```
 
 Here is a synthetic but realistic raw byte example for a single OPRA block carrying one `k` quote message:
@@ -352,32 +386,12 @@ struct KQuoteBody {
 
 A simple parsing flow in Rust looks like this:
 
-```rust
-fn parse_opra_block(input: &[u8]) {
-    let (rest, block_header) = parse_block_header(input).unwrap();
-
-    let mut cursor = rest;
-    for _ in 0..block_header.message_count {
-        let (rest_after_header, msg_header) = parse_message_header(cursor).unwrap();
-
-        cursor = match msg_header.message_category {
-            b'k' => {
-                let (rest_after_body, body) = parse_k_quote(rest_after_header).unwrap();
-                println!("{msg_header:?} {body:?}");
-                rest_after_body
-            }
-            b'q' => {
-                let (rest_after_body, body) = parse_q_quote(rest_after_header).unwrap();
-                println!("{msg_header:?} {body:?}");
-                rest_after_body
-            }
-            _ => {
-                panic!("unsupported message category: {}", msg_header.message_category as char);
-            }
-        };
-    }
-}
-```
+1. Receive a UDP payload containing an OPRA block.
+2. Parse the OPRA block header from the start of the payload.
+3. Iterate over the number of messages indicated in the block header:
+   1. Parse the 12-byte message header.
+   2. Dispatch to the appropriate message body parser based on `category + type + indicator`.
+   3. Decode the message body into a structured Rust type (`KQuoteBody`, `QQuoteBody`, etc.).
 
 The key takeaway is that the block header is the outer container for a batch of messages, the message header determines how to interpret each individual message, and the actual market data lives in the message body.
 
@@ -385,13 +399,13 @@ The key takeaway is that the block header is the outer container for a batch of 
 
 1. Strip Ethernet/VLAN/IPv4/UDP and isolate UDP payload.
 2. Parse OPRA block header.
-3. Split block data into fixed-size messages for that block.
-4. Parse 12-byte message header.
-5. Decode `q` and `k` quote-family rows into `DecodedTradeRow`.
+3. Walk each OPRA block message-by-message with a cursor.
+4. Parse each 12-byte message header.
+5. Decode implemented families (`q`, `k`, `a`) into `DecodedTradeRow`.
 
 Current decoder architecture in code:
 
-- Frame loop: `decode_trades_with_parallelism` -> `decode_trade_rows_from_frame`
+- Entry point: `decode_pcap_trades_schema` -> `decode_trade_rows_from_frame`
 - Message keying: build `MessageDispatchKey { category, type_code, indicator }`
 - Spec routing: `classify_message_family(...)` -> `decode_message_by_spec(...)`
 - Family parser (implemented): `parse_short_quote_row` (`q`), `parse_long_quote_row` (`k`), `parse_equity_index_last_sale_row` (`a`)
@@ -402,131 +416,10 @@ This gives us a production-style extension point: add a new family parser and wi
 
 #### What “Production” Still Requires
 
-- Full dispatch by `category + type + indicator` across OPRA message families (not just `q/k`)
+- Family parsers implemented for the remaining classified OPRA message families
 - Exact appendage handling (none/single/double) where spec requires it
 - Broader trade-print family parsing beyond initial `a` implementation to populate all true trade fields (`price/size/conditions/...`)
 - Category-specific handling for variable-length administrative/control messages
-
----
-
-### Example Trade Parquet Schema (`*_trades.parquet`)
-
-```bash
-# decode block rows + trade/quote-like rows into local parquet
-cd rust-ingest
-cargo run --release -- --pcap ./pcap_samples/ny4-small-10k.pcap --decode-trades
-
-# inspect resulting trade parquet in Python
-python - <<'PY'
-import pandas as pd
-df = pd.read_parquet("./pcap_samples/ny4-small-10k_trades.parquet")
-print(df.head(5))
-PY
-```
-
-Current v1 output columns:
-
-| **Column** | **How it is parsed** | **Meaning** |
-|-------------|----------------------|-------------|
-| `packet_index` | Index from `par_iter().enumerate()` | Packet position in the PCAP file. |
-| `block_sequence` | OPRA block header bytes `6..10` (big-endian) | Sequence number of the OPRA transmission block. |
-| `block_timestamp_ns` | OPRA block header sec+nsec bytes `11..19` | Block event time in nanoseconds since epoch. |
-| `message_index_in_block` | Message loop index within block | Position of message inside the block. |
-| `participant` | Message header byte `0` | Participant ID from OPRA message header. |
-| `category` | Message header byte `1` | OPRA message category (v1 decodes `q` and `k`). |
-| `type_code` | Message header byte `2` | Message type code from OPRA header. |
-| `indicator` | Message header byte `3` | Message indicator from OPRA header. |
-| `symbol_root` | Body bytes (`q`: `0..4`, `k`: `0..5`) | Root option symbol string. |
-| `osi_symbol` | Derived from root + exp block + strike | Normalized OSI-like symbol string. |
-| `bid`, `ask` | Body numeric fields with OPRA denominator rules | Decoded quote prices. |
-| `bid_size`, `ask_size` | Body size fields | Quote sizes. |
-| `price`, `size`, `side`, `action` | Reserved nullable fields in v1 | Placeholders for true trade-print decoding. |
-| `flags` | Nullable in current `q`/`k` parser | Reserved for condition/flags when mapped for a message family. |
-
-How it is decoded:
-1. Ethernet/VLAN/IPv4/UDP headers are stripped to isolate UDP payload (`decode_trades_with_parallelism` -> `decode_trade_rows_from_frame` -> `extract_udp_payload`).
-2. OPRA block header is parsed (`block_size`, `messages_in_block`, sequence, timestamp) (`parse_block_header`).
-3. Block body is split into fixed-size messages for that block (`decode_trade_rows_from_frame` message slicing loop).
-4. OPRA 12-byte message header is parsed per message (`parse_message_header`).
-5. For categories `q` and `k`, quote fields are decoded and written to `*_trades.parquet` (`parse_short_quote_row` / `parse_long_quote_row` -> `write_trades_parquet`).
-
-Note: current `*_trades.parquet` is quote-focused (`q`/`k`) research output. It is intentionally not full OPRA trade-print coverage yet.
-
----
-
-## PCAP Structure Overview
-```bash
-# High level structure
-PCAP Packet Record
-└── Ethernet Frame
-      ├── Ethernet Header (eth.*)
-      ├── VLAN Header (vlan.*)
-      └── IPv4 Packet (ip.*)
-            ├── IPv4 Header
-            └── UDP Datagram (udp.*)
-                  ├── UDP Header
-                  └── UDP Payload (udp.payload / data.data)
-                        └── OPRA Transmission Block
-                              └── OPRA Messages
-
-# With Depth
-PCAP FILE
-├── Global Header
-└── PCAP Packet Record(s)
-      ├── Timestamp
-      ├── Captured Length
-      ├── Original Length
-      └── Raw Ethernet Frame  <── actual network data starts here
-            ├── Ethernet Header (L2, 14 bytes)
-            │     ├── Destination MAC
-            │     ├── Source MAC
-            │     └── EtherType
-            │           ├── 0x0800 → IPv4 directly
-            │           └── 0x8100 / 0x88a8 → VLAN tag present
-            │
-            ├── [Optional] VLAN Header (4 bytes, if EtherType = 0x8100 / 0x88a8)
-            │     ├── Priority / DEI
-            │     ├── VLAN ID
-            │     └── Inner EtherType = 0x0800 (IPv4)
-            │
-            └── Ethernet Payload (after optional VLAN)
-                  ├── IPv4 Header (L3, 20–60 bytes)
-                  │     ├── Version + Header Length
-                  │     ├── Total Packet Length
-                  │     ├── Protocol = 17 (UDP)
-                  │     ├── Source IP
-                  │     └── Destination IP (OPRA multicast group)
-                  │
-                  └── IPv4 Payload
-                        ├── UDP Header (L4, 8 bytes)
-                        │     ├── Source Port
-                        │     ├── Destination Port
-                        │     ├── UDP Length
-                        │     └── Checksum
-                        │
-                        └── UDP Payload
-                              ├── OPRA Transmission Block
-                              │     ├── Block Header (21 bytes)
-                              │     │     ├── Block Size
-                              │     │     ├── Data Feed Indicator ('O')
-                              │     │     ├── Retransmission Indicator
-                              │     │     ├── Session Indicator
-                              │     │     ├── Block Sequence Number
-                              │     │     ├── Messages In Block
-                              │     │     ├── Timestamp (sec + ns)
-                              │     │     └── Checksum
-                              │     │
-                              │     └── Block Data
-                              │           ├── Message #1
-                              │           │     ├── 12-byte Message Header
-                              │           │     └── Message Body
-                              │           ├── Message #2
-                              │           │     ├── Header
-                              │           │     └── Body
-                              │           └── ...
-                              │
-                              └── (Optional pad byte if block length is odd)
-```
 
 ---
 
@@ -645,48 +538,8 @@ OPRA_BENCH_PCAP=pcap_samples/ny4-small-10k.pcap cargo bench --bench decode_pcap 
 
 
 
----
-
-## 🦀 Rust Ingest (OPRA PCAP → Parquet → MinIO)
-
-```bash
-cd rust-ingest
-cargo build --release # release build for better performance
-cd pcap_samples
-unzstd ny4-opra-new-a-20230822T143000.pcap.zst # unzip the zst file to get the pcap
-cd ..
-
-# most simple dev on 1m pcap
-cargo run --release -- --pcap ./pcap_samples/ny4-small-1m.pcap --bucket s3://market/bronze/opra_pcap/ --dry-run
-
-
-# Dry-run with cargo
-cargo run --release -- --pcap ./pcap_samples/ny4-opra-new-a-20230822T143000.pcap   --bucket s3://market/bronze/opra_pcap/   --minio-endpoint http://127.0.0.1:9000   --access-key minioadmin   --secret-key minioadmin   --parallel 4   --row-group-bytes 134217728  --dry-run
->>
-2026-02-25T03:12:31.862594Z  INFO opra_pcap_replayer: decoded 79920468 packets, 0 messages (skeleton)
-2026-02-25T03:12:31.862617Z  INFO opra_pcap_replayer: dry run complete
-
-# Real run with cargo
-cargo run --release -- --pcap ./pcap_samples/ny4-opra-new-a-20230822T143000.pcap   --bucket s3://market/bronze/opra_pcap/   --minio-endpoint http://127.0.0.1:9000   --access-key minioadmin   --secret-key minioadmin   --parallel 4   --row-group-bytes 134217728
-
-# Run dry-run directly with the compiled binary (after cargo build --release)
-target/release/opra-pcap-replayer   --pcap ./pcap_samples/ny4-opra-new-a-20230822T143000.pcap   --bucket s3://market/bronze/opra_pcap/   --minio-endpoint http://127.0.0.1:9000   --access-key minioadmin   --secret-key minioadmin   --parallel 4   --row-group-bytes 134217728   --dry-run
-
-# Run real directly with the compiled binary (after cargo build --release)
-target/release/opra-pcap-replayer   --pcap ./pcap_samples/ny4-opra-new-a-20230822T143000.pcap   --bucket s3://market/bronze/opra_pcap/   --minio-endpoint http://127.0.0.1:9000   --access-key minioadmin   --secret-key minioadmin   --parallel 4   --row-group-bytes 134217728
-```
-
-Real Run Expected output:
-```
-INFO opra_pcap_replayer: decoded 0 packets, 0 messages (skeleton)
-INFO opra_pcap_replayer: wrote "./demo_bronze.parquet"
-INFO opra_pcap_replayer: uploaded to s3://market/bronze/opra_pcap/demo_bronze.parquet
-```
-
----
-
 ## 🧑‍🔬 Creating Iceberg Schemas & Tables inside Superset
-### Note: Trino can also be used directly for this, but doing it through Superset allows you to verify the connection and permissions from the UI. It also assumes you've already ingested data into MinIO using the Rust OPRA PCAP replayer section above and that you've connected Superset to Trino as described in the Superset section.
+### Note: Trino can also be used directly for this, but doing it through Superset allows you to verify the connection and permissions from the UI.
 
 ```sql
 -- Create bronze schema if it doesn't exist

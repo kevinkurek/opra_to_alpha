@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use chrono::{SecondsFormat, TimeZone, Utc};
-use pcap_parser::{PcapBlock, PcapCapture, Capture};
+use pcap_parser::{Capture, PcapBlock, PcapCapture};
 use rayon::{prelude::*, ThreadPoolBuilder};
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
@@ -116,8 +116,8 @@ pub fn decode_pcap_headers_schema(
     buffer: &[u8],
     parallel: usize,
 ) -> Result<(DecodeStats, Vec<HeaderOpraRow>)> {
-    let capture = PcapCapture::from_file(buffer)
-        .map_err(|error| anyhow!("failed to parse pcap: {error}"))?;
+    let capture =
+        PcapCapture::from_file(buffer).map_err(|error| anyhow!("failed to parse pcap: {error}"))?;
 
     // Collect frames first because `capture.iter()` is an iterator; Rayon needs a splittable collection.
     // These are borrowed slices into `buffer`, so this is not copying packet bytes.
@@ -129,31 +129,30 @@ pub fn decode_pcap_headers_schema(
         })
         .collect();
 
-    let (stats, mut rows) =
-        ThreadPoolBuilder::new()
-            .num_threads(parallel)
-            .build()
-            .map_err(|error| anyhow!("failed to build rayon pool: {error}"))?
-            .install(|| {
-                legacy_frames
-                    .par_iter()
-                    .enumerate()
-                    .map(|(packet_index, &frame)| {
-                        let (stats, row) = decode_legacy_frame(packet_index, frame);
-                        let rows = row.into_iter().collect::<Vec<_>>();
-                        (stats, rows)
-                    })
-                    .reduce(
-                        || (DecodeStats::default(), Vec::new()),
-                        |(mut acc_stats, mut acc_rows), (local_stats, mut local_rows)| {
-                            acc_stats.packets = acc_stats.packets.saturating_add(local_stats.packets);
-                            acc_stats.messages =
-                                acc_stats.messages.saturating_add(local_stats.messages);
-                            acc_rows.append(&mut local_rows);
-                            (acc_stats, acc_rows)
-                        },
-                    )
-            });
+    let (stats, mut rows) = ThreadPoolBuilder::new()
+        .num_threads(parallel)
+        .build()
+        .map_err(|error| anyhow!("failed to build rayon pool: {error}"))?
+        .install(|| {
+            legacy_frames
+                .par_iter()
+                .enumerate()
+                .map(|(packet_index, &frame)| {
+                    let (stats, row) = decode_legacy_frame(packet_index, frame);
+                    let rows = row.into_iter().collect::<Vec<_>>();
+                    (stats, rows)
+                })
+                .reduce(
+                    || (DecodeStats::default(), Vec::new()),
+                    |(mut acc_stats, mut acc_rows), (local_stats, mut local_rows)| {
+                        acc_stats.packets = acc_stats.packets.saturating_add(local_stats.packets);
+                        acc_stats.messages =
+                            acc_stats.messages.saturating_add(local_stats.messages);
+                        acc_rows.append(&mut local_rows);
+                        (acc_stats, acc_rows)
+                    },
+                )
+        });
 
     // Keep row ordering stable for easier local inspection regardless of parallel execution order.
     rows.sort_unstable_by_key(|row| row.packet_index);
@@ -162,12 +161,9 @@ pub fn decode_pcap_headers_schema(
 }
 /// V2 trades decoder that walks each OPRA block sequentially using per-message lengths.
 /// This avoids assuming equal message sizes within a block.
-pub fn decode_pcap_trades_schema_v2(
-    buffer: &[u8],
-    parallel: usize,
-) -> Result<Vec<DecodedTradeRow>> {
-    let capture = PcapCapture::from_file(buffer)
-        .map_err(|error| anyhow!("failed to parse pcap: {error}"))?;
+pub fn decode_pcap_trades_schema(buffer: &[u8], parallel: usize) -> Result<Vec<DecodedTradeRow>> {
+    let capture =
+        PcapCapture::from_file(buffer).map_err(|error| anyhow!("failed to parse pcap: {error}"))?;
 
     let legacy_frames: Vec<&[u8]> = capture
         .iter()
@@ -185,7 +181,7 @@ pub fn decode_pcap_trades_schema_v2(
             legacy_frames
                 .par_iter()
                 .enumerate()
-                .map(|(packet_index, &frame)| decode_trade_rows_from_frame_v2(packet_index, frame))
+                .map(|(packet_index, &frame)| decode_trade_rows_from_frame(packet_index, frame))
                 .reduce(Vec::new, |mut acc, mut local| {
                     acc.append(&mut local);
                     acc
@@ -220,14 +216,16 @@ fn decode_legacy_frame(packet_index: usize, frame: &[u8]) -> (DecodeStats, Optio
 }
 
 /// Decode all trade-like rows from a single frame by walking OPRA messages one-by-one.
-fn decode_trade_rows_from_frame_v2(packet_index: usize, frame: &[u8]) -> Vec<DecodedTradeRow> {
+fn decode_trade_rows_from_frame(packet_index: usize, frame: &[u8]) -> Vec<DecodedTradeRow> {
     let Some(udp_payload) = extract_udp_payload(frame) else {
         return Vec::new();
     };
     let Some(block_header) = parse_block_header(udp_payload) else {
         return Vec::new();
     };
-    let Some(messages_slice) = udp_payload.get(OPRA_BLOCK_HEADER_LEN..usize::from(block_header.block_size)) else {
+    let Some(messages_slice) =
+        udp_payload.get(OPRA_BLOCK_HEADER_LEN..usize::from(block_header.block_size))
+    else {
         return Vec::new();
     };
 
@@ -254,7 +252,7 @@ fn decode_trade_rows_from_frame_v2(packet_index: usize, frame: &[u8]) -> Vec<Dec
         };
 
         let Some(msg_len) =
-            resolve_message_length_v2(header, message_window, remaining_bytes, remaining_messages)
+            resolve_message_length(header, message_window, remaining_bytes, remaining_messages)
         else {
             break;
         };
@@ -280,7 +278,7 @@ fn decode_trade_rows_from_frame_v2(packet_index: usize, frame: &[u8]) -> Vec<Dec
 }
 
 /// Decide how long the current message is based on category and known message layouts.
-fn resolve_message_length_v2(
+fn resolve_message_length(
     header: ParsedMessageHeader,
     message_window: &[u8],
     remaining_bytes: usize,
@@ -309,7 +307,7 @@ fn resolve_message_length_v2(
         }
     }
 
-    fallback_equal_split_len_v2(remaining_bytes, remaining_messages)
+    fallback_equal_split_len(remaining_bytes, remaining_messages)
 }
 
 /// Basic guardrail: ensure a chosen message length leaves room for remaining message headers.
@@ -322,7 +320,7 @@ fn is_plausible_message_len(len: usize, remaining_bytes: usize, remaining_messag
 }
 
 /// Last-resort length guess used when the message type is unknown.
-fn fallback_equal_split_len_v2(remaining_bytes: usize, remaining_messages: usize) -> Option<usize> {
+fn fallback_equal_split_len(remaining_bytes: usize, remaining_messages: usize) -> Option<usize> {
     if remaining_messages == 0 {
         return None;
     }
@@ -898,5 +896,4 @@ mod tests {
         assert_eq!(row.size, Some(271));
         assert_eq!(row.flags, Some(194));
     }
-
 }

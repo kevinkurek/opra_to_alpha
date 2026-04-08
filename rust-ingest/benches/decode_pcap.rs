@@ -65,17 +65,20 @@ fn decode_bench(c: &mut Criterion) {
         let mut group = c.benchmark_group(format!("decode_pcap/{label}"));
         group.throughput(Throughput::Bytes(pcap_bytes.len() as u64));
 
-        group.bench_function(BenchmarkId::new("rayon", format!("threads={rayon_threads}")), |b| {
-            b.iter(|| {
-                let result = opra_decoder::decode_pcap_headers_schema(
-                    black_box(&pcap_bytes),
-                    rayon_threads,
-                );
-                if result.is_err() {
-                    std::hint::black_box(result.err());
-                }
-            });
-        });
+        group.bench_function(
+            BenchmarkId::new("rayon", format!("threads={rayon_threads}")),
+            |b| {
+                b.iter(|| {
+                    let result = opra_decoder::decode_pcap_headers_schema(
+                        black_box(&pcap_bytes),
+                        rayon_threads,
+                    );
+                    if result.is_err() {
+                        std::hint::black_box(result.err());
+                    }
+                });
+            },
+        );
 
         group.finish();
     }
