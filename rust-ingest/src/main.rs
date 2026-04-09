@@ -1,11 +1,9 @@
 use anyhow::{Context, Result};
 use clap::Parser;
+use opra_pcap_replayer::{arrow_sink, opra_decoder, telemetry};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::info;
-mod arrow_sink;
-mod opra_decoder;
-mod telemetry;
 
 #[derive(Parser, Debug)]
 #[command(
