@@ -220,7 +220,9 @@ pub async fn upload_to_minio(
     use aws_config::BehaviorVersion;
     use aws_sdk_s3::config::Credentials;
     use aws_sdk_s3::primitives::ByteStream;
+    use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
     use aws_sdk_s3::Client;
+    use tokio::io::AsyncReadExt;
 
     // Static creds & custom endpoint (MinIO)
     let creds = Credentials::new(access_key, secret_key, None, None, "static");
@@ -231,7 +233,13 @@ pub async fn upload_to_minio(
         .endpoint_url(endpoint)
         .load()
         .await;
-    let s3 = Client::new(&conf);
+    let force_path_style = std::env::var("OPRA_MINIO_FORCE_PATH_STYLE")
+        .map(|value| value.eq_ignore_ascii_case("true"))
+        .unwrap_or(true);
+    let s3_config = aws_sdk_s3::config::Builder::from(&conf)
+        .force_path_style(force_path_style)
+        .build();
+    let s3 = Client::from_conf(s3_config);
 
     // Create bucket if missing (idempotent)
     let buckets = s3.list_buckets().send().await?;
@@ -244,14 +252,99 @@ pub async fn upload_to_minio(
         let _ = s3.create_bucket().bucket(bucket).send().await;
     }
 
-    // Upload
-    let body = ByteStream::from_path(local_path.to_path_buf()).await?;
-    s3.put_object()
+    // Upload strategy:
+    // - Small files: single PutObject
+    // - Large files: multipart upload with conservative 8 MiB parts to avoid
+    //   MinIO's "chunk too big: choose chunk size <= 16MiB" constraint.
+    let file_size = tokio::fs::metadata(local_path)
+        .await
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    const SINGLE_UPLOAD_LIMIT_BYTES: u64 = 16 * 1024 * 1024;
+    const MULTIPART_PART_SIZE_BYTES: usize = 8 * 1024 * 1024;
+
+    if file_size <= SINGLE_UPLOAD_LIMIT_BYTES {
+        let body = ByteStream::from_path(local_path.to_path_buf()).await?;
+        s3.put_object()
+            .bucket(bucket)
+            .key(key)
+            .body(body)
+            .send()
+            .await?;
+        return Ok(());
+    }
+
+    let create_upload = s3
+        .create_multipart_upload()
         .bucket(bucket)
         .key(key)
-        .body(body)
         .send()
         .await?;
+    let upload_id = create_upload
+        .upload_id()
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("multipart upload did not return upload_id"))?;
+
+    let mut file = tokio::fs::File::open(local_path).await?;
+    let mut parts: Vec<CompletedPart> = Vec::new();
+    let mut part_number: i32 = 1;
+    let mut remaining = file_size;
+
+    let upload_result: Result<()> = async {
+        while remaining > 0 {
+            let target_len = usize::try_from(remaining.min(MULTIPART_PART_SIZE_BYTES as u64))
+                .unwrap_or(MULTIPART_PART_SIZE_BYTES);
+            let mut buffer = vec![0_u8; target_len];
+            // Important: use read_exact so all non-final parts are exactly part-sized.
+            file.read_exact(&mut buffer).await?;
+
+            let upload_part = s3
+                .upload_part()
+                .bucket(bucket)
+                .key(key)
+                .upload_id(&upload_id)
+                .part_number(part_number)
+                .body(ByteStream::from(buffer))
+                .send()
+                .await?;
+
+            let e_tag = upload_part
+                .e_tag()
+                .map(str::to_string)
+                .ok_or_else(|| anyhow::anyhow!("upload_part missing etag for part {part_number}"))?;
+            let completed_part = CompletedPart::builder()
+                .part_number(part_number)
+                .e_tag(e_tag)
+                .build();
+            parts.push(completed_part);
+            remaining = remaining.saturating_sub(u64::try_from(target_len).unwrap_or(0));
+            part_number = part_number.saturating_add(1);
+        }
+
+        let completed_upload = CompletedMultipartUpload::builder()
+            .set_parts(Some(parts))
+            .build();
+        s3.complete_multipart_upload()
+            .bucket(bucket)
+            .key(key)
+            .upload_id(&upload_id)
+            .multipart_upload(completed_upload)
+            .send()
+            .await?;
+        Ok(())
+    }
+    .await;
+
+    if let Err(error) = upload_result {
+        let _ = s3
+            .abort_multipart_upload()
+            .bucket(bucket)
+            .key(key)
+            .upload_id(upload_id)
+            .send()
+            .await;
+        return Err(error);
+    }
 
     Ok(())
 }

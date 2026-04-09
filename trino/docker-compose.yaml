@@ -8,9 +8,9 @@ networks:
 services:
   # ⭐ MinIO object store (S3-compatible). Stores data for Hive/Iceberg/Trino.
   minio:
-    image: minio/minio:latest
+    image: minio/minio:RELEASE.2025-03-12T18-04-18Z
     # Start the object store; expose the web console on :9001 inside the container.
-    command: server /data --console-address ":9001"
+    command: server --address ":9000" --console-address ":9001" /data
     environment:
       # Root credentials used by clients (Trino/Hive) to access S3 API.
       MINIO_ROOT_USER: minioadmin

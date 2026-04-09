@@ -20,15 +20,86 @@ A full local **lakehouse stack** for data ingestion, query federation, and orche
 ---
 ### Lessons Learned
 * Batch decode is practical and fast for these sample sizes.
-* Rayon helps more as packet volume grows; tiny files can still pay parallel overhead.
+* Rayon helps more as packet volume grows; tiny files can still pay parallel overhead. About 30ms speed up over single-threaded decode for the 10m sample.
 * End-to-end throughput is good in-memory, but a future streaming mode would reduce startup latency and memory pressure on very large captures.
 
+
+---
+### Bring Up Containers (Quick Start)
+
+```bash
+# 1) Airflow (creates/uses lakehouse network)
+cd airflow-docker
+docker compose up airflow-init -d
+docker compose up -d
+
+# 2) Trino + MinIO + Hive Metastore stack
+cd ../trino
+docker compose up -d
+
+# 3) Superset
+cd ../superset
+docker compose -f docker-compose-non-dev.yml up -d
+
+# 4) Verify
+docker ps
+```
+
+Default local ports:
+- Airflow: `8080`
+- MinIO API: `9000`, MinIO Console: `9001`
+- Trino: `8081`
+- Superset: `8088`
+
+Manual Trino setup (optional fallback if auto-create is disabled):
+
+```bash
+# Create Trino schema + external table on top of MinIO location
+docker exec -i trino-trino-1 trino --server http://localhost:8081 <<'SQL'
+CREATE SCHEMA IF NOT EXISTS hive.bronze;
+
+CREATE TABLE IF NOT EXISTS hive.bronze.opra_trades_ext (
+  packet_index BIGINT,
+  block_sequence BIGINT,
+  block_timestamp_ns BIGINT,
+  block_timestamp_utc VARCHAR,
+  message_index_in_block BIGINT,
+  participant VARCHAR,
+  category VARCHAR,
+  type_code VARCHAR,
+  indicator VARCHAR,
+  symbol_root VARCHAR,
+  osi_symbol VARCHAR,
+  bid BIGINT,
+  ask BIGINT,
+  bid_size BIGINT,
+  ask_size BIGINT,
+  price BIGINT,
+  size BIGINT,
+  side VARCHAR,
+  action VARCHAR,
+  flags BIGINT
+)
+WITH (
+  format = 'PARQUET',
+  external_location = 's3://market/bronze/opra_trades/'
+);
+SQL
+```
+
+Notes:
+- Parquet upload to MinIO is automatic in `cargo run --release` (handled in `main.rs`).
+- Trino schema/table creation is also automatic during `cargo run --release` (disable via `OPRA_AUTO_CREATE_TRINO_SCHEMA=false`).
+- If `OPRA_TRINO_CATALOG=iceberg`, the pipeline creates:
+  - Hive external table: `hive.<schema>.<hive_table>` over MinIO parquet.
+  - Iceberg view: `<catalog>.<schema>.<table>` selecting from that Hive table.
 
 ---
 ### Run the Rust Ingest Binary
 
 ```bash
-# run the rust ingest binary on all 3 sample pcaps (10k, 1m, 10m)
+# run ingest on all 3 sample pcaps (10k, 1m, 10m)
+# writes local parquet + auto-uploads each output to MinIO
 cd rust-ingest
 cargo run --release
 >>
@@ -63,6 +134,30 @@ cargo run --release
   - side: Utf8 NULL
   - action: Utf8 NULL
   - flags: UInt64 NULL
+
+# optional MinIO env overrides (defaults shown)
+OPRA_MINIO_ENDPOINT=http://localhost:9000
+OPRA_MINIO_ACCESS_KEY=minioadmin
+OPRA_MINIO_SECRET_KEY=minioadmin
+OPRA_MINIO_BUCKET=market
+OPRA_MINIO_PREFIX=bronze
+
+# optional Trino auto-create env overrides (defaults shown)
+OPRA_AUTO_CREATE_TRINO_SCHEMA=true
+OPRA_TRINO_ENDPOINT=http://localhost:8081
+OPRA_TRINO_USER=trino
+OPRA_TRINO_CATALOG=hive
+OPRA_TRINO_SCHEMA=bronze
+OPRA_TRINO_TRADES_TABLE=opra_trades_ext
+OPRA_TRINO_HIVE_CATALOG=hive
+OPRA_TRINO_HIVE_TRADES_TABLE=opra_trades_ext
+# optional explicit table location (otherwise derived from bucket/prefix)
+# OPRA_TRINO_TRADES_LOCATION=s3://market/bronze/opra_trades/
+
+# example: expose data in iceberg via view while still reading parquet from hive external table
+# OPRA_TRINO_CATALOG=iceberg
+# OPRA_TRINO_SCHEMA=bronze
+# OPRA_TRINO_TRADES_TABLE=opra_trades
 
 # optional: point to a different samples directory
 cargo run --release -- --pcap-dir ./pcap_samples

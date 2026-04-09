@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use opra_pcap_replayer::{arrow_sink, opra_decoder, telemetry};
+use opra_pcap_replayer::{arrow_sink, opra_decoder, telemetry, trino_client};
+use reqwest::Client;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::info;
@@ -27,6 +28,20 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     info!("starting ingest run: {:?}", cli);
 
+    preflight_minio_endpoint()
+        .await
+        .context("MinIO endpoint preflight failed before ingest")?;
+
+    let auto_create_trino = std::env::var("OPRA_AUTO_CREATE_TRINO_SCHEMA")
+        .unwrap_or_else(|_| String::from("true"))
+        .eq_ignore_ascii_case("true");
+    if auto_create_trino {
+        trino_client::ensure_trino_schema_and_trades_table()
+            .await
+            .context("failed to auto-create Trino schema/table")?;
+        info!("ensured Trino schema/table for OPRA trades");
+    }
+
     let parallel = cli
         .parallel
         .filter(|threads| *threads > 0)
@@ -45,6 +60,60 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn preflight_minio_endpoint() -> Result<()> {
+    let endpoint =
+        std::env::var("OPRA_MINIO_ENDPOINT").unwrap_or_else(|_| String::from("http://localhost:9000"));
+    let health_url = format!("{}/minio/health/live", endpoint.trim_end_matches('/'));
+    let root_url = endpoint.clone();
+
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .context("failed to build reqwest client for MinIO preflight")?;
+
+    let proxy_http = std::env::var("HTTP_PROXY").unwrap_or_default();
+    let proxy_https = std::env::var("HTTPS_PROXY").unwrap_or_default();
+    let proxy_all = std::env::var("ALL_PROXY").unwrap_or_default();
+    let no_proxy = std::env::var("NO_PROXY").unwrap_or_default();
+
+    let health_result = client.get(&health_url).send().await;
+    if let Ok(resp) = health_result {
+        info!(
+            "MinIO preflight: {} -> HTTP {} (endpoint: {})",
+            health_url,
+            resp.status(),
+            endpoint
+        );
+        return Ok(());
+    }
+
+    let root_result = client.get(&root_url).send().await;
+    match root_result {
+        Ok(resp) => {
+            info!(
+                "MinIO root preflight: {} -> HTTP {} (health endpoint unavailable)",
+                root_url,
+                resp.status()
+            );
+            Ok(())
+        }
+        Err(error) => Err(anyhow::anyhow!(
+            "unable to reach MinIO endpoint '{}'. health_url='{}', root_url='{}'. \
+HTTP_PROXY='{}' HTTPS_PROXY='{}' ALL_PROXY='{}' NO_PROXY='{}'. \
+Hint: if MinIO is local, unset proxy vars or set NO_PROXY=127.0.0.1,localhost. \
+If MinIO serves TLS, use OPRA_MINIO_ENDPOINT=https://... . Root cause: {}",
+            endpoint,
+            health_url,
+            root_url,
+            proxy_http,
+            proxy_https,
+            proxy_all,
+            no_proxy,
+            error
+        )),
+    }
 }
 
 async fn process_single_pcap(
@@ -73,6 +142,7 @@ async fn process_single_pcap(
     let local_path = local_parquet_output_path(pcap_path, "header");
     let local_path = arrow_sink::write_header_parquet(&local_path, &rows)?;
     info!("wrote {:?} with {} header rows", &local_path, rows.len());
+    upload_parquet_to_minio(&local_path, "opra_headers").await?;
 
     // Decode pcap trades schema.
     let pcap_for_trades = Arc::clone(&pcap_bytes);
@@ -90,7 +160,49 @@ async fn process_single_pcap(
         &trades_path,
         trade_rows.len()
     );
+    upload_parquet_to_minio(&trades_path, "opra_trades").await?;
 
+    Ok(())
+}
+
+async fn upload_parquet_to_minio(local_path: &Path, dataset_prefix: &str) -> Result<()> {
+    let endpoint =
+        std::env::var("OPRA_MINIO_ENDPOINT").unwrap_or_else(|_| String::from("http://localhost:9000"));
+    let access_key =
+        std::env::var("OPRA_MINIO_ACCESS_KEY").unwrap_or_else(|_| String::from("minioadmin"));
+    let secret_key =
+        std::env::var("OPRA_MINIO_SECRET_KEY").unwrap_or_else(|_| String::from("minioadmin"));
+    let bucket = std::env::var("OPRA_MINIO_BUCKET").unwrap_or_else(|_| String::from("market"));
+    let base_prefix =
+        std::env::var("OPRA_MINIO_PREFIX").unwrap_or_else(|_| String::from("bronze"));
+
+    let filename = local_path
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("output.parquet");
+    let key = format!("{base_prefix}/{dataset_prefix}/{filename}");
+
+    arrow_sink::upload_to_minio(
+        &endpoint,
+        &access_key,
+        &secret_key,
+        &bucket,
+        &key,
+        local_path,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "failed to upload {:?} to s3://{}/{} via endpoint {}",
+            local_path, bucket, key, endpoint
+        )
+    })?;
+
+    info!(
+        "uploaded {:?} to s3://{}/{} via endpoint {}",
+        local_path, bucket, key, endpoint
+    );
     Ok(())
 }
 
