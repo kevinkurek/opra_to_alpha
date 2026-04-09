@@ -53,11 +53,11 @@ pub struct DecodedTradeRow {
     pub indicator: String,
     pub symbol_root: Option<String>,
     pub osi_symbol: Option<String>,
-    pub bid: Option<f64>,
-    pub ask: Option<f64>,
+    pub bid: Option<i64>,
+    pub ask: Option<i64>,
     pub bid_size: Option<u64>,
     pub ask_size: Option<u64>,
-    pub price: Option<f64>,
+    pub price: Option<i64>,
     pub size: Option<u64>,
     pub side: Option<String>,
     pub action: Option<String>,
@@ -539,13 +539,14 @@ fn parse_equity_index_last_sale_row(
     let trade_identifier = read_be_u32_at(body, 23)?;
 
     let (yymmdd, cp) = decode_exp_block(exp);
-    let strike = as_price_u32(strike_raw, strike_den);
+    let strike = as_price_f64_u32(strike_raw, strike_den);
     let osi_symbol = build_osi_symbol(&symbol_root, &yymmdd, cp, strike);
     let block_timestamp_ns = u64::from(block.block_ts_sec)
         .saturating_mul(1_000_000_000)
         .saturating_add(u64::from(block.block_ts_nsec));
     let message_type = char::from(header.type_code);
-    let action = Some(message_type.to_string());
+    // Databento `trades` schema uses action='T' (trade). Normalize OPRA `a` rows to match.
+    let action = Some(String::from("T"));
 
     Some(DecodedTradeRow {
         packet_index: u64::try_from(packet_index).unwrap_or(u64::MAX),
@@ -563,7 +564,7 @@ fn parse_equity_index_last_sale_row(
         ask: None,
         bid_size: None,
         ask_size: None,
-        price: Some(as_price_u32(premium_raw, premium_den)),
+        price: as_nanos_u32(premium_raw, premium_den),
         size: Some(u64::from(volume)),
         side: None,
         action,
@@ -596,7 +597,7 @@ fn parse_short_quote_row(
     let ask_size_raw = read_be_u16_at(body, 15)?;
 
     let (yymmdd, cp) = decode_exp_block(exp);
-    let strike = as_price_u16(strike_raw, b'A');
+    let strike = as_price_f64_u16(strike_raw, b'A');
     let osi_symbol = build_osi_symbol(&symbol_root, &yymmdd, cp, strike);
     let block_timestamp_ns = u64::from(block.block_ts_sec)
         .saturating_mul(1_000_000_000)
@@ -614,8 +615,8 @@ fn parse_short_quote_row(
         indicator: char::from(header.indicator).to_string(),
         symbol_root: Some(symbol_root),
         osi_symbol: Some(osi_symbol),
-        bid: Some(as_price_u16(bid_raw, b'B')),
-        ask: Some(as_price_u16(ask_raw, b'B')),
+        bid: as_nanos_u16(bid_raw, b'B'),
+        ask: as_nanos_u16(ask_raw, b'B'),
         bid_size: Some(u64::from(bid_size_raw)),
         ask_size: Some(u64::from(ask_size_raw)),
         // Leave trade print fields empty for quote records.
@@ -652,7 +653,7 @@ fn parse_long_quote_row(
     let ask_size_raw = read_be_u32_at(body, 27)?;
 
     let (yymmdd, cp) = decode_exp_block(exp);
-    let strike = as_price_u32(strike_raw, strike_den);
+    let strike = as_price_f64_u32(strike_raw, strike_den);
     let osi_symbol = build_osi_symbol(&symbol_root, &yymmdd, cp, strike);
     let block_timestamp_ns = u64::from(block.block_ts_sec)
         .saturating_mul(1_000_000_000)
@@ -670,8 +671,8 @@ fn parse_long_quote_row(
         indicator: char::from(header.indicator).to_string(),
         symbol_root: Some(symbol_root),
         osi_symbol: Some(osi_symbol),
-        bid: Some(as_price_u32(bid_raw, b'B')),
-        ask: Some(as_price_u32(ask_raw, b'B')),
+        bid: as_nanos_u32(bid_raw, b'B'),
+        ask: as_nanos_u32(ask_raw, b'B'),
         bid_size: Some(u64::from(bid_size_raw)),
         ask_size: Some(u64::from(ask_size_raw)),
         price: None,
@@ -729,8 +730,8 @@ fn build_osi_symbol(root: &str, yymmdd: &str, cp: char, strike: f64) -> String {
     format!("{root}   {yymmdd}{cp}{strike_int:08}")
 }
 
-/// Convert 16-bit raw price plus denominator code into decimal price.
-fn as_price_u16(raw: u16, den_code: u8) -> f64 {
+/// Convert 16-bit raw price plus denominator code into decimal f64 price.
+fn as_price_f64_u16(raw: u16, den_code: u8) -> f64 {
     let den = match den_code {
         b'A' => 1_u32,
         b'B' => 2_u32,
@@ -744,8 +745,8 @@ fn as_price_u16(raw: u16, den_code: u8) -> f64 {
     f64::from(raw) / 10_f64.powi(i32::try_from(den).unwrap_or(0))
 }
 
-/// Convert 32-bit raw price plus denominator code into decimal price.
-fn as_price_u32(raw: u32, den_code: u8) -> f64 {
+/// Convert 32-bit raw price plus denominator code into decimal f64 price.
+fn as_price_f64_u32(raw: u32, den_code: u8) -> f64 {
     let den = match den_code {
         b'A' => 1_u32,
         b'B' => 2_u32,
@@ -757,6 +758,36 @@ fn as_price_u32(raw: u32, den_code: u8) -> f64 {
         return f64::from(raw);
     }
     f64::from(raw) / 10_f64.powi(i32::try_from(den).unwrap_or(0))
+}
+
+/// Convert denominator code (A=1dp, B=2dp, C=3dp, D=4dp) to decimal places.
+fn denominator_places(den_code: u8) -> Option<u32> {
+    match den_code {
+        b'A' => Some(1_u32),
+        b'B' => Some(2_u32),
+        b'C' => Some(3_u32),
+        b'D' => Some(4_u32),
+        _ => None,
+    }
+}
+
+/// Convert a raw OPRA integer + denominator code into nanodollar fixed-point.
+fn raw_to_nanos(raw: u64, den_code: u8) -> Option<i64> {
+    let places = denominator_places(den_code)?;
+    let scale_pow = 9_u32.saturating_sub(places);
+    let scale = 10_i64.checked_pow(scale_pow)?;
+    let raw_i64 = i64::try_from(raw).ok()?;
+    raw_i64.checked_mul(scale)
+}
+
+/// Convert 16-bit raw price plus denominator code into nanodollar fixed-point.
+fn as_nanos_u16(raw: u16, den_code: u8) -> Option<i64> {
+    raw_to_nanos(u64::from(raw), den_code)
+}
+
+/// Convert 32-bit raw price plus denominator code into nanodollar fixed-point.
+fn as_nanos_u32(raw: u32, den_code: u8) -> Option<i64> {
+    raw_to_nanos(u64::from(raw), den_code)
 }
 
 /// Convert nanoseconds since epoch into RFC3339 UTC string.
@@ -817,8 +848,10 @@ mod tests {
 
     #[test]
     fn price_denominator_conversion() {
-        assert!((as_price_u16(423, b'B') - 4.23).abs() < 1e-9);
-        assert!((as_price_u32(123456, b'A') - 12345.6).abs() < 1e-9);
+        assert!((as_price_f64_u16(423, b'B') - 4.23).abs() < 1e-9);
+        assert!((as_price_f64_u32(123456, b'A') - 12345.6).abs() < 1e-9);
+        assert_eq!(as_nanos_u16(423, b'B'), Some(4_230_000_000));
+        assert_eq!(as_nanos_u32(49, b'B'), Some(490_000_000));
     }
 
     #[test]
@@ -892,7 +925,7 @@ mod tests {
         assert_eq!(row.category, "a");
         assert_eq!(row.type_code, "A");
         assert_eq!(row.osi_symbol.as_deref(), Some("SPY   230830P00423000"));
-        assert!((row.price.unwrap_or_default() - 0.49).abs() < 1e-9);
+        assert_eq!(row.price, Some(490_000_000));
         assert_eq!(row.size, Some(271));
         assert_eq!(row.flags, Some(194));
     }

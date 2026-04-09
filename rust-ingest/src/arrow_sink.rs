@@ -1,6 +1,6 @@
 use crate::opra_decoder::{DecodedTradeRow, HeaderOpraRow};
 use anyhow::Result;
-use arrow::array::{Float64Builder, StringBuilder, UInt64Builder};
+use arrow::array::{Int64Builder, StringBuilder, UInt64Builder};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -73,11 +73,11 @@ pub fn write_trades_parquet(path: &str, rows: &[DecodedTradeRow]) -> Result<Path
         Field::new("indicator", DataType::Utf8, false),
         Field::new("symbol_root", DataType::Utf8, true),
         Field::new("osi_symbol", DataType::Utf8, true),
-        Field::new("bid", DataType::Float64, true),
-        Field::new("ask", DataType::Float64, true),
+        Field::new("bid", DataType::Int64, true),
+        Field::new("ask", DataType::Int64, true),
         Field::new("bid_size", DataType::UInt64, true),
         Field::new("ask_size", DataType::UInt64, true),
-        Field::new("price", DataType::Float64, true),
+        Field::new("price", DataType::Int64, true),
         Field::new("size", DataType::UInt64, true),
         Field::new("side", DataType::Utf8, true),
         Field::new("action", DataType::Utf8, true),
@@ -95,11 +95,11 @@ pub fn write_trades_parquet(path: &str, rows: &[DecodedTradeRow]) -> Result<Path
     let mut indicator = StringBuilder::new();
     let mut symbol_root = StringBuilder::new();
     let mut osi_symbol = StringBuilder::new();
-    let mut bid = Float64Builder::new();
-    let mut ask = Float64Builder::new();
+    let mut bid = Int64Builder::new();
+    let mut ask = Int64Builder::new();
     let mut bid_size = UInt64Builder::new();
     let mut ask_size = UInt64Builder::new();
-    let mut price = Float64Builder::new();
+    let mut price = Int64Builder::new();
     let mut size = UInt64Builder::new();
     let mut side = StringBuilder::new();
     let mut action = StringBuilder::new();

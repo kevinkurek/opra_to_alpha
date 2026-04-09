@@ -8,14 +8,8 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 #[derive(Debug, Clone, PartialEq)]
 struct NormalizedTrade {
     ts_ns: u64,
-    price: f64,
+    price: i64,
     size: u64,
-}
-
-fn normalize_price(px: f64) -> f64 {
-    // Databento uses fixed-point nanodollar internally; decoder outputs f64.
-    // Round to 4 decimals for practical parity checks across both sources.
-    (px * 10_000.0).round() / 10_000.0
 }
 
 #[tokio::test]
@@ -72,7 +66,7 @@ async fn opra_decoder_trade_parity_with_databento_first_five() -> Result<()> {
         };
         opra_norm.push(NormalizedTrade {
             ts_ns: row.block_timestamp_ns,
-            price: normalize_price(price),
+            price,
             size,
         });
         if opra_norm.len() == 5 {
@@ -90,7 +84,7 @@ async fn opra_decoder_trade_parity_with_databento_first_five() -> Result<()> {
         .take(5)
         .map(|trade| NormalizedTrade {
             ts_ns: trade.hd.ts_event,
-            price: normalize_price(trade.price_f64()),
+            price: trade.price,
             size: u64::from(trade.size),
         })
         .collect();
@@ -127,11 +121,10 @@ async fn opra_decoder_trade_parity_with_databento_first_five() -> Result<()> {
             db.ts_ns,
             ts_delta_ns
         );
-        assert!(
-            (opra.price - db.price).abs() <= 0.01,
+        assert_eq!(
+            opra.price, db.price,
             "price mismatch at idx {idx}: opra={} db={}",
-            opra.price,
-            db.price
+            opra.price, db.price
         );
         assert_eq!(
             opra.size, db.size,

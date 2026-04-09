@@ -54,11 +54,11 @@ cargo run --release
   - indicator: Utf8 NOT NULL
   - symbol_root: Utf8 NULL
   - osi_symbol: Utf8 NULL
-  - bid: Float64 NULL
-  - ask: Float64 NULL
+  - bid: Int64 NULL   # fixed-point nanodollars
+  - ask: Int64 NULL   # fixed-point nanodollars
   - bid_size: UInt64 NULL
   - ask_size: UInt64 NULL
-  - price: Float64 NULL
+  - price: Int64 NULL # fixed-point nanodollars
   - size: UInt64 NULL
   - side: Utf8 NULL
   - action: Utf8 NULL
@@ -323,6 +323,12 @@ The remaining bytes are the `k` message body:
 
 Now decode the business meaning of those fields. The symbol is `SPY`. The month code `W` means a November put. The day is `17`. The year byte is stored as an offset from 2000, so `23` means `2023`. The strike denominator code `B` means divide the raw strike integer by 100, so `486000` becomes `4860.00`. The premium denominator code `B` also means divide by 100, so the bid raw value `157` becomes `1.57` and the ask raw value `160` becomes `1.60`. The sizes remain integer contract sizes.
 
+Internally, the decoder now stores quote/trade prices as fixed-point nanodollars (`i64`) for parity and deterministic math:
+
+- `157` with denominator `B` (`2` decimal places) -> `1.57` dollars
+- `1.57 * 1_000_000_000` -> `1_570_000_000` nanodollars
+- `160` with denominator `B` -> `1_600_000_000` nanodollars
+
 So the fully decoded quote becomes:
 
 ```json
@@ -395,13 +401,47 @@ A simple parsing flow in Rust looks like this:
 
 The key takeaway is that the block header is the outer container for a batch of messages, the message header determines how to interpret each individual message, and the actual market data lives in the message body.
 
+#### Fixed-Point Nanodollar Conversion (End-to-End)
+
+For parity with Databento DBN records, OPRA decoded `bid`, `ask`, and trade `price` are stored as `i64` nanodollars (1e-9 dollars), not `f64`.
+
+Conversion path used by the decoder:
+
+1. Read raw integer bytes from message body (`u16` or `u32`).
+2. Read denominator code (`A/B/C/D` -> 1/2/3/4 decimal places).
+3. Convert to nanodollars using:
+   - `scale_pow = 9 - decimal_places`
+   - `nanos = raw * 10^scale_pow`
+
+Concrete byte example from OPRA body:
+
+```text
+00 00 00 9D  -> bid raw = 157
+42           -> denominator code = 'B' (2 decimal places)
+```
+
+```text
+decimal price = 157 / 10^2 = 1.57
+nanodollars  = 157 * 10^(9-2) = 157 * 10^7 = 1_570_000_000
+```
+
+Another one:
+
+```text
+00 00 00 A0  -> ask raw = 160
+42           -> 'B' -> 2 decimal places
+ask nanos    = 160 * 10^7 = 1_600_000_000
+```
+
+This gives exact integer parity against Databento `TradeMsg.price` (also fixed-point), instead of tolerance-based float comparisons.
+
 #### What Our Code Does Today
 
 1. Strip Ethernet/VLAN/IPv4/UDP and isolate UDP payload.
 2. Parse OPRA block header.
 3. Walk each OPRA block message-by-message with a cursor.
 4. Parse each 12-byte message header.
-5. Decode implemented families (`q`, `k`, `a`) into `DecodedTradeRow`.
+5. Decode implemented families (`q`, `k`, `a`) into `DecodedTradeRow` with fixed-point nanodollar price fields (`bid`, `ask`, `price`).
 
 Current decoder architecture in code:
 
