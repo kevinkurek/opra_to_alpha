@@ -9,6 +9,7 @@ services:
   # ⭐ MinIO object store (S3-compatible). Stores data for Hive/Iceberg/Trino.
   minio:
     image: minio/minio:RELEASE.2025-03-12T18-04-18Z
+    restart: unless-stopped
     # Start the object store; expose the web console on :9001 inside the container.
     command: server --address ":9000" --console-address ":9001" /data
     environment:
@@ -27,8 +28,11 @@ services:
   # ⭐ Trino query coordinator. Connects to catalogs defined in ./etc/catalog.
   # Trino lets you query Iceberg/Hive tables stored in MinIO (S3).
   trino:
-    # Pull the latest Trino image.
-    image: trinodb/trino:latest
+    # Pin to a known-good digest for reproducible local behavior.
+    image: trinodb/trino@sha256:1565e8cac299a32dd9177a4da2d748da4ceb9f1560a9c409d1d18fd72ea5253e
+    restart: unless-stopped
+    # Cap container memory to prevent runaway host memory pressure.
+    mem_limit: 3g
     ports:
       # Expose Trino's web UI / coordinator port to the host at 8081.
       - "8081:8081"
@@ -37,12 +41,15 @@ services:
       - ./etc/catalog:/etc/trino/catalog
       # Mount Trino's main config (http port, memory, etc.); read-only.
       - ./etc/config.properties:/etc/trino/config.properties:ro
+      # Mount JVM options so Trino heap can be controlled explicitly.
+      - ./etc/jvm.config:/etc/trino/jvm.config:ro
     depends_on:
       # Ensure MinIO is started before Trino attempts to read/write S3.
       - minio
 
   hivemeta-postgres:
     image: postgres:16
+    restart: unless-stopped
     environment:
       POSTGRES_USER: hive
       POSTGRES_PASSWORD: hive
@@ -55,6 +62,7 @@ services:
   hive-metastore:
     # Official Apache Hive 4 image (includes metastore service).
     image: apache/hive:4.0.0
+    restart: unless-stopped
     # Name the container so it’s easy to exec/logs against.
     container_name: hive-metastore
     environment:
