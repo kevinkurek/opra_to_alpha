@@ -2,13 +2,31 @@
 ### 🧊 Trino + Iceberg + Postgres + MinIO + Airflow + Superset
 
 Rust-based OPRA PCAP ingestion.
-A full local **lakehouse stack** for data ingestion, query federation, and orchestration—integrating Trino, Apache Iceberg, MinIO (S3-compatible object store), Postgres (metadata + Airflow DB), and Apache Airflow.
+A full local **lakehouse stack** for data ingestion, query federation, and orchestration integrating Trino, Apache Iceberg, MinIO (S3-compatible object store), Postgres (metadata + Airflow DB), and Apache Airflow.
+
+---
+### Why?
+Fundamentally, as with any README, it should answer why. While items like design decision, architecture, and implementation details are listed below, the core motivation was simple; to learn how option trades which are extremely popular financial instruments actually get from a consolidated feed (OPRA) to the end user. I.E. How the raw bytes on the wire get transformed into something queryable and usable for research and analysis in a High-Frequency Trading context. If you've been around financial data for any period of time you've likely seen normalized files which are scrubbed for you prior to delivery or ingestion. Often the rules are opaque and you can't understand the decisions that went into the schema and table formats. This project was a way to build from the rawest data possible, packet capture files (PCAP) directly from OPRA. A mini version of that pipeline is here in Rust, with the goal of understanding the key components, tradeoffs, and design decisions involved in building a production-grade market data ingestion system.
+
+---
+### Visually Appealing End Results
+I put this section at the front because it's the most fun part to see the end results of the pipeline in action, and it also helps motivate the design and implementation details that come later. The screenshots below show the full end-to-end flow from raw OPRA PCAP ingestion by our Rust binary, to parquet storage in MinIO, to querying and visualization in Superset via Trino.
+- Ingested OPRA quotes and trades from PCAPs are available in Superset for ad-hoc querying and dashboarding, all powered by Trino querying MinIO parquet directly.
+![alt text](images/QuotesSample.png)
+- Trino UI showing successful runs from Superset SQL Lab querying the MinIO parquet files created by our Rust binary.
+![alt text](images/TrinoUI.png)
+- Superset Charts & Dashboards querying Trino over MinIO parquet. Quotes by Nanosecond from OPRA feed, all decoded and ingested by our Rust binary.
+![alt text](images/quotesByNanosecond.png)
+- MinIO Console showing ingested parquet files from our Rust binary, which are then queried directly by Trino without needing to load into a traditional database.
+![alt text](images/MinIOConsole.png)
 
 ---
 ### Design Philosophy
 * Keep ingestion simple and fast for local research: load PCAPs in memory, decode in parallel, and write local parquet artifacts.
-* Current default run intentionally processes the three sample sizes (`10k`, `1m`, `10m`) to show how workload size impacts decode behavior.
-* The trades decoder uses a sequential cursor per OPRA block (real message lengths resolved from `category + type + indicator`), which avoids mixed-length block parsing errors.
+* Use MinIO as a local S3-compatible store to mirror a production-like architecture and enable easy transition to any cloud storage in the future (AWS, GCP, Azure, etc.).
+* Use Trino with Hive connector to query MinIO parquet directly, and optionally create Iceberg views for more advanced features, while keeping the initial focus on a straightforward external table over parquet.
+* Use Superset for quick visualization and ad-hoc querying of the ingested data, while also providing a user- friendly interface for managing Trino connections and exploring the data without needing to use the command line or write SQL directly in Trino CLI.
+* Use Airflow for orchestration to mirror a production workflow, even though the current pipeline is simple and could be run with a single script. This allows us to easily add complexity in the future (e.g. multiple steps, dependencies, scheduling) without refactoring the entire codebase.
 
 ---
 
@@ -25,7 +43,7 @@ A full local **lakehouse stack** for data ingestion, query federation, and orche
 
 
 ---
-### Bring Up Containers (Quick Start)
+### Bring Up Containers before running Rust Ingest Binary
 
 ```bash
 # 1) Airflow (creates/uses lakehouse network)
@@ -51,50 +69,8 @@ Default local ports:
 - Trino: `8081`
 - Superset: `8088`
 
-Manual Trino setup (optional fallback if auto-create is disabled):
-
-```bash
-# Create Trino schema + external table on top of MinIO location
-docker exec -i trino-trino-1 trino --server http://localhost:8081 <<'SQL'
-CREATE SCHEMA IF NOT EXISTS hive.bronze;
-
-CREATE TABLE IF NOT EXISTS hive.bronze.opra_trades_ext (
-  packet_index BIGINT,
-  block_sequence BIGINT,
-  block_timestamp_ns BIGINT,
-  block_timestamp_utc VARCHAR,
-  message_index_in_block BIGINT,
-  participant VARCHAR,
-  category VARCHAR,
-  type_code VARCHAR,
-  indicator VARCHAR,
-  symbol_root VARCHAR,
-  osi_symbol VARCHAR,
-  bid BIGINT,
-  ask BIGINT,
-  bid_size BIGINT,
-  ask_size BIGINT,
-  price BIGINT,
-  size BIGINT,
-  side VARCHAR,
-  action VARCHAR,
-  flags BIGINT
-)
-WITH (
-  format = 'PARQUET',
-  external_location = 's3://market/bronze/opra_trades/'
-);
-SQL
-```
-
-Notes:
-- Parquet upload to MinIO is automatic in `cargo run --release` (handled in `main.rs`).
-- Trino schema/table creation is also automatic during `cargo run --release` (disable via `OPRA_AUTO_CREATE_TRINO_SCHEMA=false`).
-- If `OPRA_TRINO_CATALOG=iceberg`, the pipeline creates:
-  - Hive external table: `hive.<schema>.<hive_table>` over MinIO parquet.
-  - Iceberg view: `<catalog>.<schema>.<table>` selecting from that Hive table.
-
 ---
+
 ### Run the Rust Ingest Binary
 
 ```bash
