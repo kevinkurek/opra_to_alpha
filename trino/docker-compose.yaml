@@ -100,7 +100,27 @@ services:
       # HMS needs MinIO reachable if it touches object storage on startup/migrations.
       - minio
 
+  # ⭐ ClickHouse for local ad-hoc SQL over the same MinIO parquet data.
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.2
+    restart: unless-stopped
+    ports:
+      # HTTP interface + local web UI.
+      - "8123:8123"
+      # Native protocol for clickhouse-client and external tools.
+      - "9002:9000"
+    environment:
+      CLICKHOUSE_DB: bronze
+      CLICKHOUSE_USER: opra
+      CLICKHOUSE_PASSWORD: opra
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    depends_on:
+      - minio
+
 volumes:
   # Named volume to persist MinIO object data across container recreations.
   minio-data:
   hivemeta-pg-data:
+  clickhouse-data:

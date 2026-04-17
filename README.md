@@ -1,5 +1,5 @@
 # 🦀 Rust OPRA PCAP Ingestion & Decoding Pipeline
-### 🧊 Trino + Iceberg + Postgres + MinIO + Airflow + Superset
+### 🧊 Trino + Iceberg + Postgres + MinIO + Airflow + Superset + ClickHouse
 
 Rust-based OPRA PCAP ingestion.
 A full local **lakehouse stack** for data ingestion, query federation, and orchestration integrating Trino, Apache Iceberg, MinIO (S3-compatible object store), Postgres (metadata + Airflow DB), and Apache Airflow.
@@ -68,6 +68,56 @@ Default local ports:
 - MinIO API: `9000`, MinIO Console: `9001`
 - Trino: `8081`
 - Superset: `8088`
+- ClickHouse HTTP/UI: `8123`, native TCP: `9002`
+
+---
+
+### Optional: Query OPRA Trades in ClickHouse (Local UI)
+
+If you want a very fast local SQL UI in addition to Trino + Superset, you can run ClickHouse in the same `lakehouse` Docker network and point it directly at the parquet files already written to MinIO under `s3://market/bronze/opra_trades/`.
+
+```bash
+# from repo root
+cd trino
+docker compose up -d clickhouse
+
+# open ClickHouse web UI (embedded in recent versions)
+# http://localhost:8123
+#
+# login:
+# user: opra
+# password: opra
+# database: bronze
+```
+
+In the ClickHouse SQL editor, create a view over MinIO parquet:
+
+```sql
+CREATE OR REPLACE VIEW bronze.opra_trades_ext AS
+SELECT *
+FROM s3(
+  'http://minio:9000/market/bronze/opra_trades/*.parquet',
+  'minioadmin',
+  'minioadmin',
+  'Parquet'
+);
+```
+
+Example queries:
+
+```sql
+SELECT count() AS trade_rows
+FROM bronze.opra_trades_ext;
+
+SELECT
+  osi_symbol,
+  count() AS messages
+FROM bronze.opra_trades_ext
+WHERE osi_symbol IS NOT NULL
+GROUP BY osi_symbol
+ORDER BY messages DESC
+LIMIT 20;
+```
 
 ---
 
