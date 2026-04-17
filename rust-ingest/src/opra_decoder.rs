@@ -827,6 +827,8 @@ fn read_be_u32_at(data: &[u8], offset: usize) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
+
+    #[allow(unused_imports)]
     use super::*;
 
     #[test]

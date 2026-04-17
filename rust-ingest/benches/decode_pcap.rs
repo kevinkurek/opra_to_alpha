@@ -16,8 +16,8 @@ fn resolve_pcap_paths() -> Vec<(String, PathBuf)> {
     }
 
     let candidates = [
-        ("10k", PathBuf::from("pcap_samples/ny4-small-10k.pcap")),
-        ("1m", PathBuf::from("pcap_samples/ny4-small-1m.pcap")),
+        // ("10k", PathBuf::from("pcap_samples/ny4-small-10k.pcap")),
+        // ("1m", PathBuf::from("pcap_samples/ny4-small-1m.pcap")),
         ("10m", PathBuf::from("pcap_samples/ny4-small-10m.pcap")),
     ];
 
@@ -66,10 +66,25 @@ fn decode_bench(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(pcap_bytes.len() as u64));
 
         group.bench_function(
-            BenchmarkId::new("rayon", format!("threads={rayon_threads}")),
+            BenchmarkId::new("headers/rayon", format!("threads={rayon_threads}")),
             |b| {
                 b.iter(|| {
                     let result = opra_decoder::decode_pcap_headers_schema(
+                        black_box(&pcap_bytes),
+                        rayon_threads,
+                    );
+                    if result.is_err() {
+                        std::hint::black_box(result.err());
+                    }
+                });
+            },
+        );
+
+        group.bench_function(
+            BenchmarkId::new("trades/rayon", format!("threads={rayon_threads}")),
+            |b| {
+                b.iter(|| {
+                    let result = opra_decoder::decode_pcap_trades_schema(
                         black_box(&pcap_bytes),
                         rayon_threads,
                     );
