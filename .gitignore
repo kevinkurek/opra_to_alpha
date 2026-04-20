@@ -79,6 +79,8 @@ coverage/
 .env
 .env.*
 !.env.example
+infra/aws-gpu/terraform.tfvars
+infra/aws-gpu/.ssh/
 *.secret
 secrets/
 credentials.json

@@ -1,0 +1,4 @@
+aws_region    = "us-east-1"
+aws_profile   = "yourawsprofile"
+instance_type = "g5.xlarge"
+project_name  = "opra_to_alpha"
