@@ -19,6 +19,8 @@ I put this section at the front because it's the most fun part to see the end re
 ![alt text](images/quotesByNanosecond.png)
 - MinIO Console showing ingested parquet files from our Rust binary, which are then queried directly by Trino without needing to load into a traditional database.
 ![alt text](images/MinIOConsole.png)
+- Clickhouse showing extremely fast queries on the trades schema
+![alt text](images/Clickhouse.png)
 
 ---
 ### Design Philosophy
@@ -191,6 +193,77 @@ cargo run --release -- --pcap-dir ./pcap_samples
 # optional: pin rayon worker count
 cargo run --release -- --parallel 8
 ```
+
+---
+
+### Optional: cuTile Rust Smoke Test (`src/bin`)
+
+This repo now includes a minimal `cutile-rs` starter binary at `rust-ingest/src/bin/cutile_smoke.rs`.
+
+```bash
+cd rust-ingest
+
+# shows feature/toolchain instructions only (no GPU required)
+cargo run --bin cutile_smoke
+
+# actually JIT-compiles and launches a tiny add kernel (requires Linux + CUDA + supported NVIDIA GPU)
+cargo run --bin cutile_smoke --features gpu-cutile
+```
+
+Notes:
+- `gpu-cutile` adds an optional git dependency on NVLabs `cutile-rs` (`cutile` crate).
+- First run will take longer because the kernel is compiled/JIT-cached.
+
+---
+
+### Optional: One-command AWS GPU Spin-Up for cuTile (from your Mac)
+
+If you are on Apple Silicon (e.g. M2 Max), you can still run `cutile-rs` by provisioning a temporary NVIDIA EC2 instance from your laptop and tearing it down immediately after the test.
+
+This repo uses Terraform under `infra/aws-gpu` and includes helper scripts to:
+- create a GPU EC2 host
+- sync this repo and run `cargo run --bin cutile_smoke --features gpu-cutile`
+- terminate the instance to stop compute charges
+
+Prereqs on your Mac:
+- Terraform
+- AWS CLI v2 configured (`aws configure`)
+- `rsync`, `ssh`, `curl`
+
+Setup:
+
+```bash
+cp infra/aws-gpu/terraform.tfvars.example infra/aws-gpu/terraform.tfvars
+# edit terraform.tfvars as desired:
+# - aws_region
+# - instance_type
+# - optional ssh_cidr / ami_id / vpc_id / subnet_id (aws_profile defaults to "yourawsprofile")
+```
+
+Run end-to-end:
+
+```bash
+# 1) Terraform init + apply (also auto-generates an EC2 key pair from scratch)
+./infra/aws-gpu/up.sh
+
+# 2) Install toolchain remotely, sync repo, run cutile smoke binary
+./infra/aws-gpu/run-cutile-smoke.sh
+
+# 3) OPTIONAL: SSH in manually
+./infra/aws-gpu/ssh.sh
+
+# 4) IMPORTANT: terminate instance when finished to avoid ongoing charges
+./infra/aws-gpu/down.sh
+```
+
+Cost safety notes:
+- `down.sh` runs `terraform destroy` and removes all managed AWS resources.
+- The instance is configured with `instance-initiated-shutdown-behavior=terminate`, so running `sudo shutdown -h now` on the host also terminates it.
+- You still pay for any runtime between `up.sh` and `down.sh`.
+
+Restricted IAM note:
+- If your IAM user cannot call `ec2:DescribeVpcs` or `ssm:GetParameter`, set `vpc_id`, `subnet_id`, and `ami_id` explicitly in `infra/aws-gpu/terraform.tfvars`.
+- Doing this bypasses the default auto-discovery lookups for VPC/subnet/AMI.
 
 
 ---
