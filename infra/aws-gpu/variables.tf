@@ -45,6 +45,12 @@ variable "remote_workdir" {
   default     = "/home/ubuntu/opra_to_alpha"
 }
 
+variable "ssh_user" {
+  description = "Preferred SSH user for the AMI (auto-fallback also exists in helper scripts)."
+  type        = string
+  default     = "ubuntu"
+}
+
 variable "ssh_cidr" {
   description = "Optional CIDR allowed to SSH. If null, uses your current public IP/32."
   type        = string

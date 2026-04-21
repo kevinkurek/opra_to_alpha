@@ -3042,6 +3042,7 @@ dependencies = [
  "clap",
  "criterion",
  "cutile",
+ "cutile-compiler",
  "databento",
  "dotenvy",
  "hex",

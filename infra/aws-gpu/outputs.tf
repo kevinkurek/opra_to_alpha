@@ -15,7 +15,7 @@ output "ssh_private_key_path" {
 }
 
 output "ssh_command" {
-  value       = "ssh -i ${local_sensitive_file.ssh_key_pem.filename} ubuntu@${aws_instance.gpu.public_ip}"
+  value       = "ssh -i ${local_sensitive_file.ssh_key_pem.filename} ${var.ssh_user}@${aws_instance.gpu.public_ip}"
   description = "Convenient SSH command."
 }
 
@@ -27,4 +27,9 @@ output "remote_workdir" {
 output "ssh_cidr_effective" {
   value       = local.ssh_cidr
   description = "CIDR currently allowed for SSH ingress."
+}
+
+output "ssh_user" {
+  value       = var.ssh_user
+  description = "Preferred SSH login user."
 }

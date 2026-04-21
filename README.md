@@ -237,7 +237,7 @@ cp infra/aws-gpu/terraform.tfvars.example infra/aws-gpu/terraform.tfvars
 # edit terraform.tfvars as desired:
 # - aws_region
 # - instance_type
-# - optional ssh_cidr / ami_id / vpc_id / subnet_id (aws_profile defaults to "yourawsprofile")
+# - optional ssh_user / ssh_cidr / ami_id / vpc_id / subnet_id (aws_profile defaults to "yourawsprofile")
 ```
 
 Run end-to-end:
