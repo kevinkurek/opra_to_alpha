@@ -28,7 +28,7 @@ mod gpu_run {
     use kernel_module::spread_ratio_kernel;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-    const WORK_ITERS: usize = 64;
+    const WORK_ITERS: usize = 16;
 
     #[cutile::module]
     mod kernel_module {
@@ -47,9 +47,22 @@ mod gpu_run {
             // Intentionally compute-heavy recurrence to increase arithmetic intensity per row.
             // This is a synthetic benchmarking score, not a market spread formula.
             let mut score_t = num_t / denom_t;
-            for _ in 0..super::WORK_ITERS {
-                score_t = (num_t + score_t) / (denom_t + score_t);
-            }
+            score_t = (num_t + score_t) / (denom_t + score_t);
+            score_t = (num_t + score_t) / (denom_t + score_t);
+            score_t = (num_t + score_t) / (denom_t + score_t);
+            score_t = (num_t + score_t) / (denom_t + score_t);
+            score_t = (num_t + score_t) / (denom_t + score_t);
+            score_t = (num_t + score_t) / (denom_t + score_t);
+            score_t = (num_t + score_t) / (denom_t + score_t);
+            score_t = (num_t + score_t) / (denom_t + score_t);
+            score_t = (num_t + score_t) / (denom_t + score_t);
+            score_t = (num_t + score_t) / (denom_t + score_t);
+            score_t = (num_t + score_t) / (denom_t + score_t);
+            score_t = (num_t + score_t) / (denom_t + score_t);
+            score_t = (num_t + score_t) / (denom_t + score_t);
+            score_t = (num_t + score_t) / (denom_t + score_t);
+            score_t = (num_t + score_t) / (denom_t + score_t);
+            score_t = (num_t + score_t) / (denom_t + score_t);
             out.store(score_t);
         }
     }

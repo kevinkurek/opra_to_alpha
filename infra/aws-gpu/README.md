@@ -220,3 +220,66 @@ top 15 symbol-minute average spread_bps (sorted by row_count):
 14. symbol=SPY   230825P00438000 minute_bucket=28211910 avg_spread_bps=165.237244 rows=19047
 15. symbol=SPY   230822P00440000 minute_bucket=28211910 avg_spread_bps=292.986872 rows=18937
 ``` 
+
+What this output means:
+- `cpu spread compute ms` vs `gpu kernel ms` is the apples-to-apples math-only comparison.
+- In this f64 run, the CPU is faster for the row math (`100.544 ms` CPU vs `563.942 ms` GPU kernel).
+- `gpu pipeline total ms` includes copy overhead (`h2d` + kernel + `d2h`), so it is always larger than kernel-only.
+- `cpu groupby ms` is a different stage (string hash/group aggregation by symbol+minute), so do not compare it directly to GPU kernel.
+
+### What "harder math per row" means
+
+The original spread kernel is a very light formula per row:
+- `spread_bps = 10_000 * (ask - bid) / ((ask + bid)/2)`
+
+This is only a few arithmetic operations, so the workload is memory/transfer heavy and CPU often wins.
+
+"Harder math per row" means we intentionally add more arithmetic on each row before writing output:
+- same inputs (`bid`, `ask`)
+- more repeated compute steps per row (iterative recurrence)
+- same row count
+
+Why this helps:
+- GPUs are strongest when each row has enough compute work.
+- More math per row increases arithmetic intensity and can move the comparison from transfer-bound to compute-bound.
+- That is why the later f32 + iterative run can show GPU kernel speedup even when simple spread does not.
+
+### GPU quote score aggregation vs CPU, f32 with harder math (`work iters = 16`)
+
+```bash
+(base) kevinkurek@MacBook-Pro aws-gpu % ./run-cutile-quote-spread.sh
+
+Using SSH user: ubuntu
+Syncing rust-ingest sources...
+Uploading parquet: /Users/kevinkurek/Desktop/github/opra_to_alpha/rust-ingest/pcap_samples/ny4-small-10m_trades.parquet
+Running GPU quote spread aggregation on EC2...
+tileiras: NVIDIA (R) Cuda Tile IR optimizing assembler
+   Compiling opra-pcap-replayer v0.1.0 (/home/ubuntu/opra_to_alpha/rust-ingest)
+    Finished `release` profile [optimized] target(s) in 3.43s
+     Running `target/release/cutile_quote_spread pcap_samples/ny4-small-10m_trades.parquet`
+quote rows used: 20829552
+partition size: 16
+work iters per row: 16
+mean abs diff cpu vs gpu score: 0.000000000000
+read parquet ms: 3798.059
+cpu score compute ms: 210.834
+gpu h2d ms: 474.695
+gpu kernel ms: 156.418
+gpu d2h ms: 53.116
+gpu pipeline total ms: 684.230
+cpu groupby ms: 1532.265
+speedup (cpu_score_compute / gpu_kernel): 1.35x
+speedup (cpu_score_compute / gpu_pipeline_total): 0.31x
+```
+
+What this output means:
+- `work iters per row: 16` means each row does repeated arithmetic steps, so the kernel is more compute-heavy than basic spread.
+- `mean abs diff cpu vs gpu score: 0.000000000000` confirms CPU and GPU matched numerically for this benchmark score.
+- Apples-to-apples math comparison is `cpu score compute ms` vs `gpu kernel ms`.
+- In this run, GPU kernel is faster for compute-only (`156.418 ms` vs `210.834 ms`), so GPU wins on math stage.
+- `gpu pipeline total ms` is still slower than CPU compute because transfer overhead dominates (`h2d + d2h`).
+- `cpu groupby ms` is a separate CPU aggregation phase (hash/group by symbol-minute) and is not included in GPU kernel timing.
+
+Takeaway:
+- Harder math per row moved this workload into a regime where GPU kernel outperforms CPU compute.
+- End-to-end still has copy costs, so next gains come from reducing transfer overhead or moving more of the pipeline to GPU.
