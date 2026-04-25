@@ -214,9 +214,45 @@ Notes:
 - `gpu-cutile` adds an optional git dependency on NVLabs `cutile-rs` (`cutile` crate).
 - First run will take longer because the kernel is compiled/JIT-cached.
 
+### cuTile Benchmark Snapshot (Quote Path)
+
+For first-time readers, this benchmark uses OPRA quote rows from:
+- `rust-ingest/pcap_samples/ny4-small-10m_trades.parquet`
+
+We run a cuTile kernel and compare CPU math vs GPU kernel math on the same rows.
+
+```bash
+./infra/aws-gpu/run-cutile-quote-spread.sh
+
+quote rows used: 20829552
+partition size: 16
+work iters per row: 16
+mean abs diff cpu vs gpu score: 0.000000000000
+read parquet ms: 3798.059
+cpu score compute ms: 210.834
+gpu h2d ms: 474.695
+gpu kernel ms: 156.418
+gpu d2h ms: 53.116
+gpu pipeline total ms: 684.230
+cpu groupby ms: 1532.265
+speedup (cpu_score_compute / gpu_kernel): 1.35x
+speedup (cpu_score_compute / gpu_pipeline_total): 0.31x
+```
+
+What this is doing:
+- `cpu score compute ms` and `gpu kernel ms` are the apples-to-apples compute-only comparison.
+- `1.35x` here means GPU kernel math is faster than CPU math for this compute-heavy row function.
+- `gpu pipeline total ms` is larger because it includes transfer overhead (`h2d` and `d2h`).
+- `cpu groupby ms` is a separate CPU aggregation stage and is not part of kernel timing.
+
+What "harder math per row" means:
+- The original spread formula is light math per row and tends to be transfer/memory bound.
+- To test GPU compute behavior, we use a repeated per-row recurrence (`work iters per row`).
+- This is a synthetic benchmark score, but it demonstrates when GPU kernel throughput starts to outperform CPU compute.
+
 ---
 
-### Optional: One-command AWS GPU Spin-Up for cuTile (from your Mac)
+### One-command AWS GPU Spin-Up for cuTile
 
 If you are on Apple Silicon (e.g. M2 Max), you can still run `cutile-rs` by provisioning a temporary NVIDIA EC2 instance from your laptop and tearing it down immediately after the test.
 
@@ -260,11 +296,6 @@ Cost safety notes:
 - `down.sh` runs `terraform destroy` and removes all managed AWS resources.
 - The instance is configured with `instance-initiated-shutdown-behavior=terminate`, so running `sudo shutdown -h now` on the host also terminates it.
 - You still pay for any runtime between `up.sh` and `down.sh`.
-
-Restricted IAM note:
-- If your IAM user cannot call `ec2:DescribeVpcs` or `ssm:GetParameter`, set `vpc_id`, `subnet_id`, and `ami_id` explicitly in `infra/aws-gpu/terraform.tfvars`.
-- Doing this bypasses the default auto-discovery lookups for VPC/subnet/AMI.
-
 
 ---
 

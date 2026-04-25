@@ -6,6 +6,25 @@ This folder provisions a temporary NVIDIA GPU EC2 host for running:
 cargo run --bin cutile_smoke --features gpu-cutile
 ```
 
+## Environment Used (Terraform Defaults)
+
+The Terraform in this folder is currently set up to launch:
+
+- Instance type: `g5.xlarge` (default in `variables.tf`)
+- AMI source: AWS DLAMI SSM parameter  
+  `/aws/service/deeplearning/ami/x86_64/base-oss-nvidia-driver-gpu-ubuntu-22.04/latest/ami-id`
+- OS family: Ubuntu 22.04 (from the DLAMI path above)
+- SSH user: `ubuntu`
+
+Quick GPU/host profile for this setup:
+
+- GPU: NVIDIA A10G (1x)
+- GPU memory: ~23 GB VRAM (`23028 MiB` shown in `nvidia-smi` from our run logs)
+- GPU power limit shown: 300 W
+- Typical `g5.xlarge` host sizing: 4 vCPU, 16 GiB RAM
+
+If you override `instance_type` or `ami_id` in `terraform.tfvars`, your GPU/OS specs can differ from the above.
+
 ## Quick Start
 
 ```bash
@@ -15,6 +34,321 @@ cp terraform.tfvars.example terraform.tfvars
 ./up.sh
 ./run-cutile-smoke.sh
 ./down.sh
+```
+
+## How Cutile Tiling Works (Conceptual)
+CuTile RS — 1 Page Mental Model
+
+1) What it is
+CuTile RS is a Rust-based DSL + runtime for writing GPU kernels over tensors using a tile-based abstraction.
+Instead of managing threads, blocks, and memory manually (like CUDA), you write math over tiles and let the runtime handle execution.
+
+---
+
+2) Core Idea
+You do NOT write code for the entire dataset.
+
+You write code for:
+    → ONE TILE (a small 2D chunk of the tensor)
+
+The runtime:
+    → splits the full tensor into tiles
+    → runs your kernel on each tile in parallel on the GPU
+
+---
+
+3) CPU vs GPU mindset
+
+CPU:
+    for i in 0..N:
+        out[i] = f(x[i])
+
+GPU (CuTile):
+    define f(tile)
+    → runtime applies f to ALL tiles at once
+
+---
+
+4) Tensors
+
+A Tensor is just an N-dimensional numeric array on the GPU.
+
+Example:
+    shape = [32, 32]
+
+    [x00 x01 x02 ...]
+    [x10 x11 x12 ...]
+    ...
+
+Type annotation:
+    Tensor<f32, {[-1, -1]}> = 2D tensor, dynamic size
+
+---
+
+5) Partitioning (MOST IMPORTANT CONCEPT)
+
+Host code controls tiling:
+
+    add((&mut z).partition([4, 4]), &x, &y)
+
+This means:
+    tile size = 4 x 4
+
+So for a 32x32 tensor:
+    32 / 4 = 8 tiles per dimension
+    → 8 x 8 = 64 total tiles
+
+Each tile triggers ONE kernel execution.
+
+---
+
+6) Kernel (what you write)
+
+    #[cutile::entry()]
+    fn add(z: &mut Tensor, x: &Tensor, y: &Tensor) {
+        let tx = load_tile_like_2d(x, z);
+        let ty = load_tile_like_2d(y, z);
+        z.store(tx + ty);
+    }
+
+Interpretation:
+    "For the current output tile z:
+        - load matching tile from x
+        - load matching tile from y
+        - compute
+        - store result back into z"
+
+---
+
+7) How tiles map to data
+
+Full tensor (4x4), partition([2,2]):
+
+    [A A | B B]
+    [A A | B B]
+    -------------
+    [C C | D D]
+    [C C | D D]
+
+Tiles:
+    A = tile(0,0)
+    B = tile(0,1)
+    C = tile(1,0)
+    D = tile(1,1)
+
+Runtime runs:
+    add(A), add(B), add(C), add(D) in parallel
+
+---
+
+8) load_tile_like_2d
+
+    load_tile_like_2d(x, z)
+
+Means:
+    "Load the portion of x that aligns with this output tile z"
+
+So tile coordinates determine what slice of x is loaded.
+
+---
+
+9) Execution Flow
+
+Host (CPU):
+    - create tensors
+    - choose tile size (partition)
+    - launch kernel
+
+GPU:
+    - splits work into tiles
+    - assigns tiles across threads/warps/blocks
+    - executes kernel for each tile
+
+---
+
+10) What CuTile abstracts away
+
+You do NOT manage:
+    - threads
+    - warps
+    - blocks
+    - memory coalescing manually
+
+You DO control:
+    - tensor shapes
+    - tile sizes
+    - math inside kernel
+
+---
+
+11) Final mental model
+
+Think:
+
+    partition → defines tiles
+    kernel → defines math per tile
+    runtime → applies kernel to all tiles in parallel
+
+Or even tighter:
+
+    "Write math for a small 2D block — GPU runs it everywhere."
+
+## Example Tile Workflow
+
+```bash
+CuTile RS — load_tile_like_2d Example (Full Walkthrough)
+
+START: Host defines 2D tensors (already 2D, no conversion inside kernel)
+
+x =
+[ 1   2   3   4 ]
+[ 5   6   7   8 ]
+[ 9  10  11  12 ]
+[13  14  15  16 ]
+
+y =
+[10  20  30  40]
+[50  60  70  80]
+[90  91  92  93]
+[94  95  96  97]
+
+Host call:
+partition([2,2])
+
+→ This means tile size = 2x2
+→ 4x4 tensor becomes 4 tiles total (2x2 grid of tiles)
+
+--------------------------------------------------
+
+FULL TENSOR VIEW (with tile boundaries)
+
+[ 1   2 |  3   4 ]
+[ 5   6 |  7   8 ]
+-----------------
+[ 9  10 | 11  12 ]
+[13  14 | 15  16 ]
+
+Same layout for y.
+
+--------------------------------------------------
+
+KERNEL LOGIC (runs once per tile)
+
+fn add(z, x, y):
+    tile_x = load_tile_like_2d(x, z)
+    tile_y = load_tile_like_2d(y, z)
+    z.store(tile_x + tile_y)
+
+IMPORTANT:
+z = current output tile (NOT full tensor)
+
+--------------------------------------------------
+
+KERNEL CALL 1 → tile (0,0)
+
+z =
+[ ?  ? ]
+[ ?  ? ]
+
+load_tile_like_2d(x, z) →
+[1 2]
+[5 6]
+
+load_tile_like_2d(y, z) →
+[10 20]
+[50 60]
+
+compute →
+[11 22]
+[55 66]
+
+store into top-left of output
+
+--------------------------------------------------
+
+KERNEL CALL 2 → tile (0,1)
+
+z =
+[ ?  ? ]
+[ ?  ? ]
+
+load_tile_like_2d(x, z) →
+[3 4]
+[7 8]
+
+load_tile_like_2d(y, z) →
+[30 40]
+[70 80]
+
+compute →
+[33 44]
+[77 88]
+
+store into top-right
+
+--------------------------------------------------
+
+KERNEL CALL 3 → tile (1,0)
+
+z =
+[ ?  ? ]
+[ ?  ? ]
+
+load_tile_like_2d(x, z) →
+[ 9 10]
+[13 14]
+
+load_tile_like_2d(y, z) →
+[90 91]
+[94 95]
+
+compute →
+[ 99 101]
+[107 109]
+
+store into bottom-left
+
+--------------------------------------------------
+
+KERNEL CALL 4 → tile (1,1)
+
+z =
+[ ?  ? ]
+[ ?  ? ]
+
+load_tile_like_2d(x, z) →
+[11 12]
+[15 16]
+
+load_tile_like_2d(y, z) →
+[92 93]
+[96 97]
+
+compute →
+[103 105]
+[111 113]
+
+store into bottom-right
+
+--------------------------------------------------
+
+FINAL OUTPUT
+
+[ 11  22  33  44 ]
+[ 55  66  77  88 ]
+[ 99 101 103 105 ]
+[107 109 111 113 ]
+
+--------------------------------------------------
+
+KEY TAKEAWAYS
+
+1) Tensors are already 2D (host defines shape)
+2) partition([2,2]) defines tile size = 2x2
+3) Kernel runs once per tile (4 total calls here)
+4) z = current output tile
+5) load_tile_like_2d(x, z) = "load matching slice of x for this tile"
+6) No implicit 1D → 2D conversion inside kernel
 ```
 
 ## Run Real Parquet Aggregation On GPU
