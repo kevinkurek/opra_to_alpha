@@ -36,6 +36,30 @@ cp terraform.tfvars.example terraform.tfvars
 ./down.sh
 ```
 
+## How to actually connect with VS Code Remote SSH
+1) Make sure you have the Remote SSH extension installed in VS Code.
+2) Run `./up.sh` to provision the EC2 instance.
+3) Note the public IP address output by `./up.sh` (e.g. `ec2-3-123-45-67.compute-1.amazonaws.com`).
+4) In VS Code, open the Command Palette (Cmd+Shift+P) and select "Remote-SSH: Connect to Host...".
+5) If you have an existing SSH config, the new host should automatically appear in the list. If not, you can add it manually to your `~/.ssh/config` on your local computer:
+```Host my-aws-gpu
+    HostName ec2-x-xxx-xxx-xxx.compute-1.amazonaws.com
+    User ubuntu
+    IdentityFile ~/.ssh/my-aws-gpu.pem
+```
+6) Select the host from the Remote-SSH list to connect. VS Code will establish an SSH connection to the EC2 instance and open a new window.
+7) Run `./run-cutile-smoke.sh` since it will add `opra_to_alpha` repo and run the cutile smoke test on the GPU instance. You should see the output in the VS Code terminal.
+8) You should now be able to see files like `opra_to_alpha/rust-ingest/bin/cutile_quote_spread` which WILL be highlighted since you're in an environment where the GPU binaries are built and run.
+9) You may need to install `sudo apt install cargo` on the EC2 instance if you want to build new GPU binaries directly on the host.
+10) Might need to have this at the root directory next ot Cargo.toml on the EC2 instance to ensure `rustfmt` and `clippy` are available for GPU code development:
+```bash
+# rust-toolchain.toml
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+```
+11) When done, run `./down.sh` from your local terminal to destroy the EC2 instance and avoid ongoing costs.
+
 ## How Cutile Tiling Works (Conceptual)
 CuTile RS — 1 Page Mental Model
 
@@ -464,53 +488,6 @@ sample notional[0..8]: [2320000000.0, 130000000.0, 1310000000.0, 320000000.0, 25
 - CPU and GPU became accurate at f64 precision because at f32 precision the large notional values caused floating point errors.
 - First we just make sure that the CPU and GPU computations produce the same results for the notional sums.
 - The CPU is significantly faster for this small dataset, but the GPU pipeline is necessary for larger datasets where the parallelism can be leveraged.
-```bash
-
-(base) kevinkurek@MacBook-Pro aws-gpu % ./run-cutile-parquet-agg.sh
-
-Using SSH user: ubuntu
-Syncing rust-ingest sources...
-Uploading parquet: /Users/kevinkurek/Desktop/github/opra_to_alpha/rust-ingest/pcap_samples/ny4-small-10m_trades.parquet
-Running GPU parquet aggregation on EC2...
-tileiras: NVIDIA (R) Cuda Tile IR optimizing assembler
-   Compiling opra-pcap-replayer v0.1.0 (/home/ubuntu/opra_to_alpha/rust-ingest)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.23s
-     Running `target/debug/cutile_parquet_agg pcap_samples/ny4-small-10m_trades.parquet`
-rows used: 5486
-partition size: 2
-cpu sum(price*size): 1488257553746561178009600.000
-gpu sum(price*size): 1488257553746561178009600.000
-abs diff: 0.000000
-sample notional[0..8]: [2320000000.0, 130000000.0, 1310000000.0, 320000000.0, 250000000.0, 2320000000.0, 5000000000.0, 11600000000.0]
-read parquet ms: 67865.210
-cpu compute ms: 0.110
-gpu h2d ms: 477.855
-gpu kernel ms: 250.067
-gpu d2h ms: 0.106
-gpu reduce ms: 0.076
-gpu pipeline total ms: 728.104
-speedup (cpu_compute / gpu_kernel): 0.00x
-speedup (cpu_compute / gpu_pipeline_total): 0.00x
-```
-
-```bash
-# ran in release mode
-rows used: 5486
-partition size: 2
-cpu sum(price*size): 1488257553746561178009600.000
-gpu sum(price*size): 1488257553746561178009600.000
-abs diff: 0.000000
-sample notional[0..8]: [2320000000.0, 130000000.0, 1310000000.0, 320000000.0, 250000000.0, 2320000000.0, 5000000000.0, 11600000000.0]
-read parquet ms: 3899.058
-cpu compute ms: 0.006
-gpu h2d ms: 1457.467
-gpu kernel ms: 119.573
-gpu d2h ms: 0.087
-gpu reduce ms: 0.005
-gpu pipeline total ms: 1577.132
-speedup (cpu_compute / gpu_kernel): 0.00x
-speedup (cpu_compute / gpu_pipeline_total): 0.00x
-```
 
 
 ### GPU quote spread aggregation vs CPU, f64 precision.
@@ -554,29 +531,6 @@ top 15 symbol-minute average spread_bps (sorted by row_count):
 14. symbol=SPY   230825P00438000 minute_bucket=28211910 avg_spread_bps=165.237244 rows=19047
 15. symbol=SPY   230822P00440000 minute_bucket=28211910 avg_spread_bps=292.986872 rows=18937
 ``` 
-
-What this output means:
-- `cpu spread compute ms` vs `gpu kernel ms` is the apples-to-apples math-only comparison.
-- In this f64 run, the CPU is faster for the row math (`100.544 ms` CPU vs `563.942 ms` GPU kernel).
-- `gpu pipeline total ms` includes copy overhead (`h2d` + kernel + `d2h`), so it is always larger than kernel-only.
-- `cpu groupby ms` is a different stage (string hash/group aggregation by symbol+minute), so do not compare it directly to GPU kernel.
-
-### What "harder math per row" means
-
-The original spread kernel is a very light formula per row:
-- `spread_bps = 10_000 * (ask - bid) / ((ask + bid)/2)`
-
-This is only a few arithmetic operations, so the workload is memory/transfer heavy and CPU often wins.
-
-"Harder math per row" means we intentionally add more arithmetic on each row before writing output:
-- same inputs (`bid`, `ask`)
-- more repeated compute steps per row (iterative recurrence)
-- same row count
-
-Why this helps:
-- GPUs are strongest when each row has enough compute work.
-- More math per row increases arithmetic intensity and can move the comparison from transfer-bound to compute-bound.
-- That is why the later f32 + iterative run can show GPU kernel speedup even when simple spread does not.
 
 ### GPU quote score aggregation vs CPU, f32 with harder math (`work iters = 16`)
 
