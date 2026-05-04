@@ -1,10 +1,8 @@
-// ...existing code...
 /airflow-docker/logs/*
 /superset/*
 !/superset/docker-compose-non-dev.yml
 !/superset/docker-compose.yml
 /rust-injest/target/*
-// ...existing code...
 
 # parquet files
 *.parquet
