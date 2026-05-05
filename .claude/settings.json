@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "deny": [
+      "Read(./infra/aws-gpu/terraform.tfvars)",
+      "Read(./infra/aws-gpu/terraform.tfvars.json)",
+      "Read(./infra/aws-gpu/.ssh/**)",
+      "Read(**/*.pem)",
+      "Read(~/.aws/credentials)",
+      "Read(~/.aws/config)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/secret-guard.sh\"",
+            "timeout": 5,
+            "statusMessage": "secret-guard"
+          }
+        ]
+      }
+    ]
+  }
+}
