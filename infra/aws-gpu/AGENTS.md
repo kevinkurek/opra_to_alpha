@@ -14,7 +14,10 @@ how to handle credentials safely, and what the agent must never do.
 
 These are also enforced by the PreToolUse hook in `.claude/settings.json`
 (`secret-guard.sh`). Obey them whether or not the hook is active — defense in
-depth.
+depth. The hook's behavior is pinned by `.claude/hooks/secret-guard.test.sh`
+(26 cases; run locally with `bash .claude/hooks/secret-guard.test.sh`) and
+exercised on every change to the hook in CI via
+`.github/workflows/secret-guard-tests.yml`.
 
 1. **Never read secret files.** No `Read`, `cat`, `head`, `tail`, `less`, `bat`,
    `xxd`, `base64`, `cp`, `mv`, `tee` against:
